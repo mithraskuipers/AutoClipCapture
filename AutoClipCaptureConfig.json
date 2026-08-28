@@ -1,8 +1,10 @@
-﻿{
+{
     "LogFile":  "CapturedOutput.txt",
     "CopyDelayMs":  250,
     "AfterActionKeyDelayMs":  250,
     "TimerTickMs":  250,
+    "SkipRowsStart":  3,
+    "SkipRowsEnd":  3,
     "ActionKeyDisplay":  "F8",
     "ActionKeyToken":  "{F8}",
     "DupDetectEnabled":  true,
