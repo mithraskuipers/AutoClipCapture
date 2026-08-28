@@ -1,9 +1,9 @@
 <#
 =====================================================================
- ConfigGUI.ps1
+ AutoClipCaptureConfigGUI.ps1
 =====================================================================
- Simple GUI for editing RelayConfig.json - the settings file used
- by CommandRelay.ps1. Lets you change:
+ Simple GUI for editing AutoClipCaptureConfig.json - the settings file used
+ by AutoClipCapture.ps1. Lets you change:
 
    - The log file path
    - The action key (the button sent after each Ctrl+C - default F8)
@@ -15,7 +15,7 @@
      captures come back almost identical, e.g. the target app has
      stopped producing new data)
    - The Toggle hotkey (start/stop capture)
-   - The Exit hotkey (quit CommandRelay)
+   - The Exit hotkey (quit AutoClipCapture)
 
  The two HOTKEYS (Toggle/Exit) are global shortcuts, so Windows
  requires at least one modifier (Ctrl/Alt/Shift) - a bare key like
@@ -26,7 +26,7 @@
  modifier at all (e.g. plain F8), or a modified combo if the target
  app needs one (e.g. Ctrl+F8).
 
- Changes only take effect the next time CommandRelay.ps1 is started
+ Changes only take effect the next time AutoClipCapture.ps1 is started
  (or restarted) - it reads the config once at launch.
 =====================================================================
 #>
@@ -34,7 +34,7 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-$ConfigPath = Join-Path $PSScriptRoot "RelayConfig.json"
+$ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 
 function Get-DefaultConfig {
     [pscustomobject]@{
@@ -171,7 +171,7 @@ $script:PreCaptureText = ""
 
 # ------------------------- Build the form -----------------------------
 $form                 = New-Object System.Windows.Forms.Form
-$form.Text            = "CommandRelay - Configuration"
+$form.Text            = "AutoClipCapture - Configuration"
 $form.Size            = New-Object System.Drawing.Size(480, 690)
 $form.StartPosition   = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
@@ -382,7 +382,7 @@ $btnSetToggle.Add_Click({
 })
 
 $lblExit = New-Object System.Windows.Forms.Label
-$lblExit.Text = "Quit CommandRelay:"
+$lblExit.Text = "Quit AutoClipCapture:"
 $lblExit.Location = New-Object System.Drawing.Point(15, 65)
 $lblExit.Size = New-Object System.Drawing.Size(140, 20)
 
@@ -480,7 +480,7 @@ $btnSave.Add_Click({
     $newConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $ConfigPath -Encoding UTF8
 
     [System.Windows.Forms.MessageBox]::Show(
-        "Configuration saved to:`n$ConfigPath`n`nRestart CommandRelay for the changes to take effect.",
+        "Configuration saved to:`n$ConfigPath`n`nRestart AutoClipCapture for the changes to take effect.",
         "Saved", 'OK', 'Information') | Out-Null
 })
 

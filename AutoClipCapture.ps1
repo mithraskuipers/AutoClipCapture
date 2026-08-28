@@ -1,6 +1,6 @@
 <#
 =====================================================================
- CommandRelay.ps1
+ AutoClipCapture.ps1
 =====================================================================
  Runs quietly in the background and listens for two GLOBAL hotkeys
  (they work even while a different application is focused):
@@ -8,7 +8,7 @@
    [Toggle hotkey]  -> Start / stop the capture loop.
                        When STARTING:
                          1. You are asked to CLICK the window you
-                            want CommandRelay to operate on. A small
+                            want AutoClipCapture to operate on. A small
                             status banner in the top-left corner of
                             the screen tells you it's waiting for
                             the click (press Esc to cancel instead).
@@ -50,9 +50,9 @@
  hotkeys, duplicate-capture detection, and how many rows to skip at the
  start/end of each capture (e.g. to drop a repeated header/footer row a
  target app always copies along with the data) - are read from
- RelayConfig.json (same folder as this script). Use ConfigGUI.ps1 (or
- the "ConfigureCommandRelay.bat" launcher) to change them without
- editing this file. If RelayConfig.json doesn't exist yet, a default
+ AutoClipCaptureConfig.json (same folder as this script). Use AutoClipCaptureConfigGUI.ps1 (or
+ the "ConfigureAutoClipCapture.bat" launcher) to change them without
+ editing this file. If AutoClipCaptureConfig.json doesn't exist yet, a default
  one is created automatically on first run.
 
  IMPORTANT:
@@ -65,7 +65,7 @@
 =====================================================================
 #>
 
-$ConfigPath = Join-Path $PSScriptRoot "RelayConfig.json"
+$ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 
 function Get-DefaultConfig {
     [pscustomobject]@{
@@ -88,13 +88,13 @@ if (Test-Path $ConfigPath) {
     try {
         $Config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
     } catch {
-        Write-Host "RelayConfig.json is corrupt or unreadable - falling back to defaults." -ForegroundColor Yellow
+        Write-Host "AutoClipCaptureConfig.json is corrupt or unreadable - falling back to defaults." -ForegroundColor Yellow
         $Config = Get-DefaultConfig
     }
 } else {
     $Config = Get-DefaultConfig
     $Config | ConvertTo-Json -Depth 5 | Set-Content -Path $ConfigPath -Encoding UTF8
-    Write-Host "No config found - created a default RelayConfig.json." -ForegroundColor Yellow
+    Write-Host "No config found - created a default AutoClipCaptureConfig.json." -ForegroundColor Yellow
 }
 
 # ---- Resolve settings from config (with fallbacks for older config files) ----
@@ -263,7 +263,7 @@ Add-Type -TypeDefinition $formSource -ReferencedAssemblies "System.Windows.Forms
 [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
 [System.Windows.Forms.Application]::add_ThreadException({
     param($sender, $e)
-    Write-Host "[CommandRelay] Unhandled UI exception (recovered): $($e.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "[AutoClipCapture] Unhandled UI exception (recovered): $($e.Exception.Message)" -ForegroundColor Yellow
 })
 
 # Minimize this script's own console window. It sends Ctrl+C to whatever
@@ -663,7 +663,7 @@ function Set-RelayForeground {
     return $true
 }
 
-Write-Host "CommandRelay is running." -ForegroundColor White
+Write-Host "AutoClipCapture is running." -ForegroundColor White
 Write-Host "  $ToggleDisplay  -> start/stop the capture loop" -ForegroundColor White
 Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $ExitDisplay  -> quit"
@@ -700,7 +700,7 @@ $tickAction = {
         switch ($global:CR_State) {
             'Idle' {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
+                    Write-Host "[AutoClipCapture] Target window is gone - stopping capture." -ForegroundColor Red
                     Stop-RelayCapture
                     return
                 }
@@ -729,18 +729,18 @@ $tickAction = {
                                         $timer.Stop()
                                         $pct = [Math]::Round($similarity * 100, 2)
                                         Set-RelayStatus "-> $($global:CR_TargetTitle) : Duplicate capture ($pct% match)" ([System.Drawing.Color]::Yellow)
-                                        Write-Host "[CommandRelay] Duplicate capture detected ($pct% match with the previous one)." -ForegroundColor Yellow
+                                        Write-Host "[AutoClipCapture] Duplicate capture detected ($pct% match with the previous one)." -ForegroundColor Yellow
 
                                         $choice = Show-DuplicateCapturePrompt -Similarity $similarity -TargetTitle $global:CR_TargetTitle
                                         if ($choice -eq 'Stop') {
                                             Stop-RelayCapture
-                                            Write-Host "[CommandRelay] Capture STOPPED (duplicate content confirmed by user)." -ForegroundColor Cyan
+                                            Write-Host "[AutoClipCapture] Capture STOPPED (duplicate content confirmed by user)." -ForegroundColor Cyan
                                             $stopRequested = $true
                                         } else {
                                             # Don't nag again every single cycle - only re-arm once a
                                             # genuinely different capture comes in (see the 'else' below).
                                             $global:CR_SuppressDupWarning = $true
-                                            Write-Host "[CommandRelay] Continuing despite duplicate content (won't ask again until new content appears)." -ForegroundColor Yellow
+                                            Write-Host "[AutoClipCapture] Continuing despite duplicate content (won't ask again until new content appears)." -ForegroundColor Yellow
                                         }
 
                                         if ($global:CR_Running) { $timer.Start() }
@@ -766,7 +766,7 @@ $tickAction = {
                     if ($stopRequested) { return }
 
                     if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                        Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
+                        Write-Host "[AutoClipCapture] Target window is gone - stopping capture." -ForegroundColor Red
                         Stop-RelayCapture
                         return
                     }
@@ -788,7 +788,7 @@ $tickAction = {
         # makes PowerShell throw "The pipeline has been stopped." here.
         # Log it and reset to a safe state instead of letting it bubble
         # up and crash the whole app.
-        Write-Host "[CommandRelay] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "[AutoClipCapture] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
         $global:CR_State     = 'Idle'
         $global:CR_ElapsedMs = 0
     }
@@ -812,7 +812,7 @@ $hotkeyAction = {
                 while ($true) {
                     $picked = Select-TargetWindow
                     if ($null -eq $picked) {
-                        Write-Host "[CommandRelay] Capture start cancelled (no window selected)." -ForegroundColor Yellow
+                        Write-Host "[AutoClipCapture] Capture start cancelled (no window selected)." -ForegroundColor Yellow
                         Hide-RelayStatus
                         return
                     }
@@ -820,14 +820,14 @@ $hotkeyAction = {
                         $target = $picked
                         break
                     }
-                    Write-Host "[CommandRelay] Selection rejected - click the correct window." -ForegroundColor Yellow
+                    Write-Host "[AutoClipCapture] Selection rejected - click the correct window." -ForegroundColor Yellow
                 }
 
                 # 2. Ask for the filename, same as before, then start
                 #    right away once Enter is pressed.
                 $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
                 if ($null -eq $name) {
-                    Write-Host "[CommandRelay] Capture start cancelled." -ForegroundColor Yellow
+                    Write-Host "[AutoClipCapture] Capture start cancelled." -ForegroundColor Yellow
                     Hide-RelayStatus
                     return
                 }
@@ -851,19 +851,19 @@ $hotkeyAction = {
                 $timer.Stop()
                 $timer.Start()
 
-                Write-Host "[CommandRelay] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
-                Write-Host "[CommandRelay] Target window -> $($target.Title)" -ForegroundColor Green
+                Write-Host "[AutoClipCapture] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
+                Write-Host "[AutoClipCapture] Target window -> $($target.Title)" -ForegroundColor Green
                 Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)
             } finally {
                 $global:CR_Selecting = $false
             }
         } else {
             Stop-RelayCapture
-            Write-Host "[CommandRelay] Capture STOPPED" -ForegroundColor Cyan
+            Write-Host "[AutoClipCapture] Capture STOPPED" -ForegroundColor Cyan
         }
     }
     elseif ($id -eq $ExitHotkeyId) {
-        Write-Host "[CommandRelay] Exiting..." -ForegroundColor Magenta
+        Write-Host "[AutoClipCapture] Exiting..." -ForegroundColor Magenta
         [System.Windows.Forms.Application]::Exit()
     }
 }
@@ -877,4 +877,4 @@ $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
 $statusForm.Dispose()
-Write-Host "CommandRelay stopped."
+Write-Host "AutoClipCapture stopped."
