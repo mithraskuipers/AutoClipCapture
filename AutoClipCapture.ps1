@@ -37,6 +37,35 @@
 
    [Exit hotkey]    -> Fully quits this script
 
+   [Mode hotkeys]   -> Any number of extra "scan modes" can be defined
+                       and bound to their own hotkey (Ctrl+Shift+1 by
+                       default runs the built-in "SQL Search" mode).
+                       Pressing a mode's hotkey:
+                         1. Asks you to click/confirm a target window,
+                            same as the Toggle hotkey above.
+                         2. Repeatedly sends the mode's ACTION KEY to
+                            that window, waits, sends CTRL+C, waits,
+                            then checks the clipboard text against the
+                            mode's configured phrases:
+                              - If the "found" phrase appears -> stop
+                                and show the "found" message full-
+                                screen.
+                              - If the "not found" phrase (or the
+                                optional second "not found" phrase)
+                                appears -> stop and show the "not
+                                found" message full-screen.
+                              - If neither appears yet (e.g. the
+                                screen hasn't finished updating) ->
+                                press the action key again and check
+                                once more, up to a safety limit
+                                (MaxIterations) so a misconfigured
+                                mode can't loop forever.
+                       Pressing the same mode's hotkey again while it
+                       is running cancels it. Only one mode (or the
+                       Toggle relay) can run at a time. New modes are
+                       added/edited from the "Modes" tab in the config
+                       GUI - no script editing required.
+
  Duplicate-capture protection: each capture is compared to the one
  immediately before it. If they come back 99.5% identical (default;
  configurable), that usually means the target app has stopped handing
@@ -47,9 +76,10 @@
  different content shows up and then goes stale again.
 
  All settings - default log location, timing, the action key, both
- hotkeys, duplicate-capture detection, and how many rows to skip at the
+ hotkeys, duplicate-capture detection, how many rows to skip at the
  start/end of each capture (e.g. to drop a repeated header/footer row a
- target app always copies along with the data) - are read from
+ target app always copies along with the data), and the list of scan
+ Modes - are read from
  AutoClipCaptureConfig.json (same folder as this script). Use AutoClipCaptureConfigGUI.ps1 (or
  the "ConfigureAutoClipCapture.bat" launcher) to change them without
  editing this file. If AutoClipCaptureConfig.json doesn't exist yet, a default
@@ -81,6 +111,30 @@ function Get-DefaultConfig {
         DupDetectThreshold    = 0.995   # 99.5%
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C" }  # Ctrl+Alt+C
         ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X" }  # Ctrl+Alt+X
+        ResultOverlayDurationMs = 4000
+        Modes                 = @( Get-DefaultSqlSearchMode )
+    }
+}
+
+# The default "scan mode" bound to Ctrl+Shift+1. Instead of the plain
+# Toggle relay (Ctrl+Shift+P), this repeatedly presses F5, copies the
+# screen, and looks for "EXEC SQL" - showing a big SQL FOUND / NO SQL
+# FOUND banner once it knows the answer. New modes of this same shape
+# can be added from the config GUI's "Modes" tab, no editing needed.
+function Get-DefaultSqlSearchMode {
+    [pscustomobject]@{
+        Id                  = "sql-search"
+        Name                = "SQL Search"
+        Enabled             = $true
+        Hotkey              = [pscustomobject]@{ Modifiers = 6; Key = 0x31; Display = "Ctrl+Shift+1" }  # Ctrl+Shift+1
+        ActionKeyToken      = "{F5}"
+        ActionKeyDisplay    = "F5"
+        FoundText           = "EXEC SQL"
+        FoundOverlayText    = "SQL FOUND"
+        NotFoundText        = "No CHARS 'sql' found"
+        TerminalText        = "*Bottom of data reached*"
+        NotFoundOverlayText = "NO SQL FOUND"
+        MaxIterations       = 500
     }
 }
 
@@ -146,6 +200,21 @@ if ($Config.PSObject.Properties.Name -contains 'DupDetectThreshold') {
     $DupDetectThreshold = 0.995
 }
 if ($DupDetectThreshold -gt 1) { $DupDetectThreshold = $DupDetectThreshold / 100.0 }  # tolerate "99.5" as well as "0.995"
+
+if ($Config.PSObject.Properties.Name -contains 'ResultOverlayDurationMs') {
+    $ResultOverlayDurationMs = [int]$Config.ResultOverlayDurationMs
+} else {
+    $ResultOverlayDurationMs = 4000
+}
+
+# Older config files won't have a Modes array yet - fall back to the
+# built-in SQL Search mode (Ctrl+Shift+1) so it's available by default
+# even for configs created before Modes existed.
+if ($Config.PSObject.Properties.Name -contains 'Modes' -and $null -ne $Config.Modes) {
+    $ModeConfigs = @($Config.Modes)
+} else {
+    $ModeConfigs = @( Get-DefaultSqlSearchMode )
+}
 
 $ToggleHotkeyId  = 1
 $ToggleModifiers = [int]$Config.ToggleHotkey.Modifiers
@@ -452,6 +521,30 @@ if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ExitHotkeyId, $ExitModifiers
     Write-Host "Failed to register the EXIT hotkey ($ExitDisplay). It may already be in use by another app." -ForegroundColor Red
 }
 
+# ---- Register one global hotkey per enabled Mode. IDs start at 100 so
+# they never collide with ToggleHotkeyId(1)/ExitHotkeyId(2), or with
+# each other, regardless of how many modes exist. $ModeHotkeyMap maps
+# hotkey id -> the mode's config object, for the hotkey handler below. ----
+$ModeHotkeyMap  = @{}
+$ModeHotkeyBase = 100
+$modeIndex = 0
+foreach ($m in $ModeConfigs) {
+    $modeIndex++
+    if (-not $m.Enabled) { continue }
+    if ($null -eq $m.Hotkey -or $null -eq $m.Hotkey.Key -or [int]$m.Hotkey.Key -eq 0) {
+        Write-Host "Mode '$($m.Name)' has no hotkey assigned - skipping." -ForegroundColor Yellow
+        continue
+    }
+    $hkId  = $ModeHotkeyBase + $modeIndex
+    $mMods = [int]$m.Hotkey.Modifiers
+    $mKey  = [int]$m.Hotkey.Key
+    if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $hkId, $mMods, $mKey)) {
+        Write-Host "Failed to register the hotkey for mode '$($m.Name)' ($($m.Hotkey.Display)). It may already be in use." -ForegroundColor Red
+        continue
+    }
+    $ModeHotkeyMap[$hkId] = $m
+}
+
 # ---- Top-left status overlay: a tiny always-on-top banner that never
 # steals keyboard focus (StatusOverlay overrides ShowWithoutActivation
 # and adds WS_EX_NOACTIVATE), so showing/updating it never interrupts
@@ -493,6 +586,76 @@ function Set-RelayStatus {
 
 function Hide-RelayStatus {
     $statusForm.Hide()
+}
+
+# ---- Big centered "result" banner used by scan Modes to announce their
+# outcome (e.g. "SQL FOUND" / "NO SQL FOUND"). Reuses the same
+# non-activating StatusOverlay window type as the corner status banner
+# above, just bigger, centered, and auto-hiding after
+# $ResultOverlayDurationMs (0 = stays until the next action starts). ----
+$resultOverlay = New-Object StatusOverlay
+$resultOverlay.FormBorderStyle = 'None'
+$resultOverlay.StartPosition   = 'Manual'
+$resultOverlay.ShowInTaskbar   = $false
+$resultOverlay.TopMost         = $true
+$resultOverlay.Opacity         = 0.92
+$resultOverlay.Size            = New-Object System.Drawing.Size(520, 160)
+
+$resultLabel = New-Object System.Windows.Forms.Label
+$resultLabel.Dock      = 'Fill'
+$resultLabel.TextAlign = 'MiddleCenter'
+$resultLabel.ForeColor = [System.Drawing.Color]::White
+$resultLabel.Font      = New-Object System.Drawing.Font('Segoe UI', 28, [System.Drawing.FontStyle]::Bold)
+$resultLabel.Text      = ''
+$resultOverlay.Controls.Add($resultLabel)
+
+[void]$resultOverlay.Handle
+$resultOverlay.Hide()
+
+$resultHideTimer = New-Object System.Windows.Forms.Timer
+$resultHideTimer.Add_Tick({
+    $resultHideTimer.Stop()
+    $resultOverlay.Hide()
+})
+
+function Show-RelayResultOverlay {
+    param(
+        [string]$Text,
+        [System.Drawing.Color]$Color = [System.Drawing.Color]::LimeGreen,
+        [int]$DurationMs = $ResultOverlayDurationMs
+    )
+    $resultHideTimer.Stop()
+    $resultOverlay.BackColor = $Color
+    $resultLabel.Text        = $Text
+
+    $screenArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $x = $screenArea.Left + [int](($screenArea.Width  - $resultOverlay.Width)  / 2)
+    $y = $screenArea.Top  + [int](($screenArea.Height - $resultOverlay.Height) / 2)
+    $resultOverlay.Location = New-Object System.Drawing.Point($x, $y)
+
+    $resultOverlay.Show()
+    $resultOverlay.BringToFront()
+
+    if ($DurationMs -gt 0) {
+        $resultHideTimer.Interval = $DurationMs
+        $resultHideTimer.Start()
+    }
+}
+
+function Hide-RelayResultOverlay {
+    $resultHideTimer.Stop()
+    $resultOverlay.Hide()
+}
+
+# Case-insensitive "does Text contain Needle" check used by Mode
+# evaluation. Plain substring search (not -like/-match), so a needle
+# that itself contains wildcard-ish characters like * still matches the
+# literal text rather than being treated as a wildcard pattern.
+function Test-RelayTextContains {
+    param([string]$Text, [string]$Needle)
+    if ([string]::IsNullOrEmpty($Needle)) { return $false }
+    if ([string]::IsNullOrEmpty($Text)) { return $false }
+    return ($Text.IndexOf($Needle, [StringComparison]::OrdinalIgnoreCase) -ge 0)
 }
 
 # ---- Window picking: user clicks a window, we identify it, then a
@@ -625,11 +788,27 @@ function Show-DuplicateCapturePrompt {
 function Stop-RelayCapture {
     $timer.Stop()
     $global:CR_Running            = $false
+    $global:CR_ActiveAutomation   = $null
     $global:CR_State              = 'Idle'
     $global:CR_ElapsedMs          = 0
     $global:CR_PrevCaptureText    = $null
     $global:CR_SuppressDupWarning = $false
     $global:CR_TargetHandle       = [IntPtr]::Zero
+    Hide-RelayStatus
+}
+
+# Mirrors Stop-RelayCapture, but for a running scan Mode instead of the
+# classic Toggle relay. Called both when a mode reaches a stop condition
+# (found / not-found / safety limit) and when its hotkey is pressed
+# again to cancel it manually.
+function Stop-ModeCapture {
+    $timer.Stop()
+    $global:CR_ActiveAutomation = $null
+    $global:CR_ActiveModeConfig = $null
+    $global:CR_ModeState        = 'Action'
+    $global:CR_ElapsedMs        = 0
+    $global:CR_ModeIterations   = 0
+    $global:CR_TargetHandle     = [IntPtr]::Zero
     Hide-RelayStatus
 }
 
@@ -667,6 +846,10 @@ Write-Host "AutoClipCapture is running." -ForegroundColor White
 Write-Host "  $ToggleDisplay  -> start/stop the capture loop" -ForegroundColor White
 Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $ExitDisplay  -> quit"
+foreach ($hkId in $ModeHotkeyMap.Keys) {
+    $m = $ModeHotkeyMap[$hkId]
+    Write-Host "  $($m.Hotkey.Display)  -> mode: $($m.Name)  (action key: $($m.ActionKeyDisplay))" -ForegroundColor White
+}
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
 Write-Host "Config:     $ConfigPath"
@@ -690,11 +873,107 @@ $global:CR_TargetTitle  = ''
 $global:CR_PrevCaptureText     = $null
 $global:CR_SuppressDupWarning  = $false
 
+# $null = nothing running, 'Relay' = the classic Toggle capture loop,
+# or a Mode's Id = that scan Mode is running. Only one of these can be
+# active at a time - it's what the Toggle/Mode hotkey handlers check
+# before allowing a new session to start.
+$global:CR_ActiveAutomation = $null
+$global:CR_ActiveModeConfig = $null
+$global:CR_ModeState        = 'Action'   # Action -> PostAction -> PostCopy -> Action ...
+$global:CR_ModeIterations   = 0
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
 
 $tickAction = {
-    if (-not $global:CR_Running) { return }
+    if ($null -eq $global:CR_ActiveAutomation) { return }
+
+    if ($global:CR_ActiveAutomation -ne 'Relay') {
+        # ---- A scan Mode is running; the classic Relay state machine
+        # below is skipped entirely while that's the case. ----
+        try {
+            $mode = $global:CR_ActiveModeConfig
+            switch ($global:CR_ModeState) {
+                'Action' {
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($mode.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-ModeCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($mode.Name)] Sending $($mode.ActionKeyDisplay)" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($mode.ActionKeyToken)
+                    $global:CR_ModeState = 'PostAction'
+                    $global:CR_ElapsedMs = 0
+                }
+                'PostAction' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                            Write-Host "[AutoClipCapture] [$($mode.Name)] Target window is gone - stopping." -ForegroundColor Red
+                            Stop-ModeCapture
+                            return
+                        }
+                        Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($mode.Name)] Copying (Ctrl+C)" ([System.Drawing.Color]::Lime)
+                        [System.Windows.Forms.SendKeys]::SendWait('^c')
+                        $global:CR_ModeState = 'PostCopy'
+                        $global:CR_ElapsedMs = 0
+                    }
+                }
+                'PostCopy' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                        $text = ''
+                        try {
+                            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                                $text = [System.Windows.Forms.Clipboard]::GetText()
+                            }
+                        } catch {
+                            Write-Host "[AutoClipCapture] [$($mode.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                        }
+
+                        $global:CR_ModeIterations++
+
+                        $foundMatch    = Test-RelayTextContains -Text $text -Needle $mode.FoundText
+                        # NotFoundText and TerminalText are both treated as an
+                        # immediate "not found" stop condition - either one
+                        # appearing means the target app has already given a
+                        # definitive answer, so there's no reason to press
+                        # the action key again.
+                        $notFoundMatch = (Test-RelayTextContains -Text $text -Needle $mode.NotFoundText) -or
+                                         (Test-RelayTextContains -Text $text -Needle $mode.TerminalText)
+
+                        if ($foundMatch) {
+                            Write-Host "[AutoClipCapture] [$($mode.Name)] '$($mode.FoundText)' found." -ForegroundColor Green
+                            Show-RelayResultOverlay -Text $mode.FoundOverlayText -Color ([System.Drawing.Color]::LimeGreen)
+                            Stop-ModeCapture
+                        }
+                        elseif ($notFoundMatch) {
+                            Write-Host "[AutoClipCapture] [$($mode.Name)] Not-found phrase matched." -ForegroundColor Yellow
+                            Show-RelayResultOverlay -Text $mode.NotFoundOverlayText -Color ([System.Drawing.Color]::OrangeRed)
+                            Stop-ModeCapture
+                        }
+                        elseif ($global:CR_ModeIterations -ge [int]$mode.MaxIterations) {
+                            Write-Host "[AutoClipCapture] [$($mode.Name)] Stopped - safety limit of $($mode.MaxIterations) iterations reached." -ForegroundColor Yellow
+                            Show-RelayResultOverlay -Text "STOPPED (limit reached)" -Color ([System.Drawing.Color]::Gray)
+                            Stop-ModeCapture
+                        }
+                        else {
+                            # Neither phrase matched yet (e.g. the screen
+                            # hasn't finished updating) - press the action
+                            # key again and check once more.
+                            $global:CR_ModeState = 'Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Host "[AutoClipCapture] [$($global:CR_ActiveModeConfig.Name)] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
+            $global:CR_ModeState = 'Action'
+            $global:CR_ElapsedMs = 0
+        }
+        return
+    }
 
     try {
         switch ($global:CR_State) {
@@ -803,68 +1082,125 @@ $hotkeyAction = {
     if ($id -eq $ToggleHotkeyId) {
         if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
 
-        if (-not $global:CR_Running) {
-            $global:CR_Selecting = $true
-            try {
-                # 1. Click-to-pick the target window, with a Yes/No
-                #    identify-and-confirm step (Enter = Yes).
-                $target = $null
-                while ($true) {
-                    $picked = Select-TargetWindow
-                    if ($null -eq $picked) {
-                        Write-Host "[AutoClipCapture] Capture start cancelled (no window selected)." -ForegroundColor Yellow
-                        Hide-RelayStatus
-                        return
-                    }
-                    if (Confirm-TargetWindow -Title $picked.Title) {
-                        $target = $picked
-                        break
-                    }
-                    Write-Host "[AutoClipCapture] Selection rejected - click the correct window." -ForegroundColor Yellow
-                }
+        if ($global:CR_ActiveAutomation -eq 'Relay') {
+            Stop-RelayCapture
+            Write-Host "[AutoClipCapture] Capture STOPPED" -ForegroundColor Cyan
+            return
+        }
+        if ($null -ne $global:CR_ActiveAutomation) {
+            $busyName = if ($global:CR_ActiveModeConfig) { $global:CR_ActiveModeConfig.Name } else { $global:CR_ActiveAutomation }
+            Write-Host "[AutoClipCapture] Can't start the Toggle relay - '$busyName' is currently running." -ForegroundColor Yellow
+            return
+        }
 
-                # 2. Ask for the filename, same as before, then start
-                #    right away once Enter is pressed.
-                $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
-                if ($null -eq $name) {
-                    Write-Host "[AutoClipCapture] Capture start cancelled." -ForegroundColor Yellow
+        $global:CR_Selecting = $true
+        try {
+            # 1. Click-to-pick the target window, with a Yes/No
+            #    identify-and-confirm step (Enter = Yes).
+            $target = $null
+            while ($true) {
+                $picked = Select-TargetWindow
+                if ($null -eq $picked) {
+                    Write-Host "[AutoClipCapture] Capture start cancelled (no window selected)." -ForegroundColor Yellow
                     Hide-RelayStatus
                     return
                 }
-                $safeName = Get-SafeFileName $name
-                if (-not $safeName.ToLower().EndsWith('.txt')) { $safeName += '.txt' }
-
-                $global:CR_LogFile      = Join-Path $LogDir $safeName
-                $global:CR_TargetHandle = $target.Handle
-                $global:CR_TargetTitle  = $target.Title
-                $global:CR_Running      = $true
-                $global:CR_State        = 'Idle'
-                $global:CR_ElapsedMs    = 0
-                $global:CR_PrevCaptureText    = $null
-                $global:CR_SuppressDupWarning = $false
-
-                # Stop then Start (rather than just Start) so the timer's
-                # own interval countdown always begins fresh for this new
-                # session, regardless of whatever state - running, stopped
-                # via duplicate-detection, stopped manually - it was left
-                # in by the previous one.
-                $timer.Stop()
-                $timer.Start()
-
-                Write-Host "[AutoClipCapture] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
-                Write-Host "[AutoClipCapture] Target window -> $($target.Title)" -ForegroundColor Green
-                Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)
-            } finally {
-                $global:CR_Selecting = $false
+                if (Confirm-TargetWindow -Title $picked.Title) {
+                    $target = $picked
+                    break
+                }
+                Write-Host "[AutoClipCapture] Selection rejected - click the correct window." -ForegroundColor Yellow
             }
-        } else {
-            Stop-RelayCapture
-            Write-Host "[AutoClipCapture] Capture STOPPED" -ForegroundColor Cyan
+
+            # 2. Ask for the filename, same as before, then start
+            #    right away once Enter is pressed.
+            $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
+            if ($null -eq $name) {
+                Write-Host "[AutoClipCapture] Capture start cancelled." -ForegroundColor Yellow
+                Hide-RelayStatus
+                return
+            }
+            $safeName = Get-SafeFileName $name
+            if (-not $safeName.ToLower().EndsWith('.txt')) { $safeName += '.txt' }
+
+            $global:CR_LogFile      = Join-Path $LogDir $safeName
+            $global:CR_TargetHandle = $target.Handle
+            $global:CR_TargetTitle  = $target.Title
+            $global:CR_Running      = $true
+            $global:CR_ActiveAutomation = 'Relay'
+            $global:CR_State        = 'Idle'
+            $global:CR_ElapsedMs    = 0
+            $global:CR_PrevCaptureText    = $null
+            $global:CR_SuppressDupWarning = $false
+
+            # Stop then Start (rather than just Start) so the timer's
+            # own interval countdown always begins fresh for this new
+            # session, regardless of whatever state - running, stopped
+            # via duplicate-detection, stopped manually - it was left
+            # in by the previous one.
+            $timer.Stop()
+            $timer.Start()
+
+            Write-Host "[AutoClipCapture] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
+            Write-Host "[AutoClipCapture] Target window -> $($target.Title)" -ForegroundColor Green
+            Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)
+        } finally {
+            $global:CR_Selecting = $false
         }
     }
     elseif ($id -eq $ExitHotkeyId) {
         Write-Host "[AutoClipCapture] Exiting..." -ForegroundColor Magenta
         [System.Windows.Forms.Application]::Exit()
+    }
+    elseif ($ModeHotkeyMap.ContainsKey($id)) {
+        if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
+        $mode = $ModeHotkeyMap[$id]
+
+        if ($global:CR_ActiveAutomation -eq $mode.Id) {
+            Stop-ModeCapture
+            Write-Host "[AutoClipCapture] [$($mode.Name)] Cancelled." -ForegroundColor Cyan
+            return
+        }
+        if ($null -ne $global:CR_ActiveAutomation) {
+            $busyName = if ($global:CR_ActiveModeConfig) { $global:CR_ActiveModeConfig.Name } else { $global:CR_ActiveAutomation }
+            Write-Host "[AutoClipCapture] Can't start '$($mode.Name)' - '$busyName' is currently running." -ForegroundColor Yellow
+            return
+        }
+
+        $global:CR_Selecting = $true
+        try {
+            $target = $null
+            while ($true) {
+                $picked = Select-TargetWindow
+                if ($null -eq $picked) {
+                    Write-Host "[AutoClipCapture] [$($mode.Name)] Start cancelled (no window selected)." -ForegroundColor Yellow
+                    Hide-RelayStatus
+                    return
+                }
+                if (Confirm-TargetWindow -Title $picked.Title) {
+                    $target = $picked
+                    break
+                }
+                Write-Host "[AutoClipCapture] [$($mode.Name)] Selection rejected - click the correct window." -ForegroundColor Yellow
+            }
+
+            Hide-RelayResultOverlay
+            $global:CR_TargetHandle     = $target.Handle
+            $global:CR_TargetTitle      = $target.Title
+            $global:CR_ActiveAutomation = $mode.Id
+            $global:CR_ActiveModeConfig = $mode
+            $global:CR_ModeState        = 'Action'
+            $global:CR_ElapsedMs        = 0
+            $global:CR_ModeIterations   = 0
+
+            $timer.Stop()
+            $timer.Start()
+
+            Write-Host "[AutoClipCapture] [$($mode.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
+            Set-RelayStatus "-> $($target.Title) : [$($mode.Name)] starting..." ([System.Drawing.Color]::Lime)
+        } finally {
+            $global:CR_Selecting = $false
+        }
     }
 }
 
@@ -876,5 +1212,9 @@ $form.Add_HotkeyPressed($hotkeyAction)
 $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
+foreach ($hkId in $ModeHotkeyMap.Keys) {
+    [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
+}
 $statusForm.Dispose()
+$resultOverlay.Dispose()
 Write-Host "AutoClipCapture stopped."

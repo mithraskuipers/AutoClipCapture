@@ -16,5 +16,26 @@
                        "Modifiers":  6,
                        "Key":  81,
                        "Display":  "Ctrl+Shift+Q"
-                   }
+                   },
+    "ResultOverlayDurationMs":  4000,
+    "Modes":  [
+                  {
+                      "Id":  "sql-search",
+                      "Name":  "SQL Search",
+                      "Enabled":  true,
+                      "Hotkey":  {
+                                     "Modifiers":  6,
+                                     "Key":  49,
+                                     "Display":  "Ctrl+Shift+1"
+                                 },
+                      "ActionKeyToken":  "{F5}",
+                      "ActionKeyDisplay":  "F5",
+                      "FoundText":  "EXEC SQL",
+                      "FoundOverlayText":  "SQL FOUND",
+                      "NotFoundText":  "No CHARS 'sql' found",
+                      "TerminalText":  "*Bottom of data reached*",
+                      "NotFoundOverlayText":  "NO SQL FOUND",
+                      "MaxIterations":  500
+                  }
+              ]
 }
