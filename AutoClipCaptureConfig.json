@@ -12,13 +12,21 @@
     "ToggleHotkey":  {
                          "Modifiers":  6,
                          "Key":  80,
-                         "Display":  "Ctrl+Shift+P"
+                         "Display":  "Ctrl+Shift+P",
+                         "RequireRightModifier":  false
                      },
     "ExitHotkey":  {
                        "Modifiers":  6,
                        "Key":  81,
-                       "Display":  "Ctrl+Shift+Q"
+                       "Display":  "Ctrl+Shift+Q",
+                       "RequireRightModifier":  false
                    },
+    "F3Hotkey":  {
+                     "Modifiers":  2,
+                     "Key":  35,
+                     "Display":  "Ctrl+End",
+                     "RequireRightModifier":  true
+                 },
     "ResultOverlayDurationMs":  4000,
     "Modes":  [
                   {
@@ -26,10 +34,12 @@
                       "Name":  "SQL Search",
                       "Enabled":  true,
                       "Hotkey":  {
-                                     "Modifiers":  6,
-                                     "Key":  49,
-                                     "Display":  "Ctrl+Shift+1"
+                                     "Modifiers":  2,
+                                     "Key":  46,
+                                     "Display":  "Ctrl+Delete",
+                                     "RequireRightModifier":  true
                                  },
+                      "UseFocusedWindow":  true,
                       "ActionKeyToken":  "{F5}",
                       "ActionKeyDisplay":  "F5",
                       "FoundText":  "EXEC SQL",

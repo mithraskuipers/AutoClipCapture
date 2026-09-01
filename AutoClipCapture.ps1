@@ -37,12 +37,19 @@
 
    [Exit hotkey]    -> Fully quits this script
 
-   [Mode hotkeys]   -> Any number of extra "scan modes" can be defined
-                       and bound to their own hotkey (Ctrl+Shift+1 by
-                       default runs the built-in "SQL Search" mode).
+   [Mode hotkeys]   -> Any number of extra "scan modes" can be defined,
+                       each bound to its own hotkey (Right Ctrl+Delete
+                       by default runs the built-in "SQL Search" mode).
                        Pressing a mode's hotkey:
-                         1. Asks you to click/confirm a target window,
-                            same as the Toggle hotkey above.
+                         1. If the mode is set to use the focused
+                            window (the default for SQL Search), the
+                            window that already has focus at the
+                            moment the hotkey is pressed is used
+                            immediately - no click-to-select or
+                            confirmation step. Older modes without
+                            that flag still ask you to click/confirm a
+                            target window, same as the Toggle hotkey
+                            above.
                          2. Repeatedly sends the mode's ACTION KEY to
                             that window, waits, sends CTRL+C, waits,
                             then checks the clipboard text against the
@@ -62,9 +69,18 @@
                                 mode can't loop forever.
                        Pressing the same mode's hotkey again while it
                        is running cancels it. Only one mode (or the
-                       Toggle relay) can run at a time. New modes are
-                       added/edited from the "Modes" tab in the config
-                       GUI - no script editing required.
+                       Toggle relay) can run at a time. Modes
+                       themselves are no longer edited from the config
+                       GUI - only their hotkeys are. A hotkey flagged
+                       "right-side only" (the SQL Search default) only
+                       fires when the physical RIGHT Ctrl/Alt/Shift key
+                       is the one held down.
+
+   [F3 hotkey]      -> Right Ctrl+End by default. Sends a single F3
+                       keypress straight to whatever window already
+                       has focus - no window selection, no loop, no
+                       clipboard involved. Ignored while the Toggle
+                       relay or a scan mode is running.
 
  Duplicate-capture protection: each capture is compared to the one
  immediately before it. If they come back 99.5% identical (default;
@@ -75,11 +91,11 @@
  Continue won't re-prompt every cycle; it only asks again once new,
  different content shows up and then goes stale again.
 
- All settings - default log location, timing, the action key, both
- hotkeys, duplicate-capture detection, how many rows to skip at the
- start/end of each capture (e.g. to drop a repeated header/footer row a
- target app always copies along with the data), and the list of scan
- Modes - are read from
+ All settings - default log location, timing, the action key, the
+ Toggle/Exit/F3 hotkeys, duplicate-capture detection, how many rows to
+ skip at the start/end of each capture (e.g. to drop a repeated
+ header/footer row a target app always copies along with the data),
+ and the list of scan Modes - are read from
  AutoClipCaptureConfig.json (same folder as this script). Use AutoClipCaptureConfigGUI.ps1 (or
  the "ConfigureAutoClipCapture.bat" launcher) to change them without
  editing this file. If AutoClipCaptureConfig.json doesn't exist yet, a default
@@ -109,24 +125,27 @@ function Get-DefaultConfig {
         ActionKeyToken        = "{F8}"
         DupDetectEnabled      = $true
         DupDetectThreshold    = 0.995   # 99.5%
-        ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C" }  # Ctrl+Alt+C
-        ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X" }  # Ctrl+Alt+X
+        ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C"; RequireRightModifier = $false }  # Ctrl+Alt+C
+        ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }  # Ctrl+Alt+X
+        F3Hotkey              = [pscustomobject]@{ Modifiers = 2; Key = 0x23; Display = "Ctrl+End"; RequireRightModifier = $true }     # Right Ctrl+End -> single F3 press
         ResultOverlayDurationMs = 4000
         Modes                 = @( Get-DefaultSqlSearchMode )
     }
 }
 
-# The default "scan mode" bound to Ctrl+Shift+1. Instead of the plain
-# Toggle relay (Ctrl+Shift+P), this repeatedly presses F5, copies the
-# screen, and looks for "EXEC SQL" - showing a big SQL FOUND / NO SQL
-# FOUND banner once it knows the answer. New modes of this same shape
-# can be added from the config GUI's "Modes" tab, no editing needed.
+# The default "scan mode" bound to Right Ctrl+Delete. Instead of the
+# plain Toggle relay (Ctrl+Alt+C), this repeatedly presses F5, copies
+# the screen, and looks for "EXEC SQL" - showing a big SQL FOUND / NO
+# SQL FOUND banner once it knows the answer. UseFocusedWindow means it
+# targets whatever window already has focus when the hotkey is
+# pressed, instead of asking you to click/confirm a window first.
 function Get-DefaultSqlSearchMode {
     [pscustomobject]@{
         Id                  = "sql-search"
         Name                = "SQL Search"
         Enabled             = $true
-        Hotkey              = [pscustomobject]@{ Modifiers = 6; Key = 0x31; Display = "Ctrl+Shift+1" }  # Ctrl+Shift+1
+        Hotkey              = [pscustomobject]@{ Modifiers = 2; Key = 0x2E; Display = "Ctrl+Delete"; RequireRightModifier = $true }  # Right Ctrl+Delete
+        UseFocusedWindow    = $true
         ActionKeyToken      = "{F5}"
         ActionKeyDisplay    = "F5"
         FoundText           = "EXEC SQL"
@@ -208,23 +227,51 @@ if ($Config.PSObject.Properties.Name -contains 'ResultOverlayDurationMs') {
 }
 
 # Older config files won't have a Modes array yet - fall back to the
-# built-in SQL Search mode (Ctrl+Shift+1) so it's available by default
-# even for configs created before Modes existed.
+# built-in SQL Search mode (Right Ctrl+Delete) so it's available by
+# default even for configs created before Modes existed.
 if ($Config.PSObject.Properties.Name -contains 'Modes' -and $null -ne $Config.Modes) {
     $ModeConfigs = @($Config.Modes)
 } else {
     $ModeConfigs = @( Get-DefaultSqlSearchMode )
 }
 
+# Fill in fields that older config files (or modes added before this
+# feature existed) won't have, so nothing throws on a missing property.
+foreach ($m in $ModeConfigs) {
+    if (-not ($m.PSObject.Properties.Name -contains 'UseFocusedWindow')) {
+        $m | Add-Member -NotePropertyName UseFocusedWindow -NotePropertyValue $false -Force
+    }
+    if ($null -ne $m.Hotkey -and -not ($m.Hotkey.PSObject.Properties.Name -contains 'RequireRightModifier')) {
+        $m.Hotkey | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
+    }
+}
+
 $ToggleHotkeyId  = 1
 $ToggleModifiers = [int]$Config.ToggleHotkey.Modifiers
 $ToggleKey       = [int]$Config.ToggleHotkey.Key
 $ToggleDisplay   = [string]$Config.ToggleHotkey.Display
+$ToggleRequireRightModifier = ($Config.ToggleHotkey.PSObject.Properties.Name -contains 'RequireRightModifier') -and [bool]$Config.ToggleHotkey.RequireRightModifier
 
 $ExitHotkeyId    = 2
 $ExitModifiers   = [int]$Config.ExitHotkey.Modifiers
 $ExitKey         = [int]$Config.ExitHotkey.Key
 $ExitDisplay     = [string]$Config.ExitHotkey.Display
+$ExitRequireRightModifier = ($Config.ExitHotkey.PSObject.Properties.Name -contains 'RequireRightModifier') -and [bool]$Config.ExitHotkey.RequireRightModifier
+
+$F3HotkeyId      = 3
+if ($Config.PSObject.Properties.Name -contains 'F3Hotkey' -and $null -ne $Config.F3Hotkey) {
+    $F3Modifiers = [int]$Config.F3Hotkey.Modifiers
+    $F3Key       = [int]$Config.F3Hotkey.Key
+    $F3Display   = [string]$Config.F3Hotkey.Display
+    $F3RequireRightModifier = ($Config.F3Hotkey.PSObject.Properties.Name -contains 'RequireRightModifier') -and [bool]$Config.F3Hotkey.RequireRightModifier
+} else {
+    $f3Default   = (Get-DefaultConfig).F3Hotkey
+    $F3Modifiers = [int]$f3Default.Modifiers
+    $F3Key       = [int]$f3Default.Key
+    $F3Display   = [string]$f3Default.Display
+    $F3RequireRightModifier = [bool]$f3Default.RequireRightModifier
+}
+$F3ActionKeyToken = '{F3}'
 # ----------------------------------------------------------------------
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -520,6 +567,9 @@ if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ToggleHotkeyId, $ToggleModif
 if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ExitHotkeyId, $ExitModifiers, $ExitKey)) {
     Write-Host "Failed to register the EXIT hotkey ($ExitDisplay). It may already be in use by another app." -ForegroundColor Red
 }
+if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $F3HotkeyId, $F3Modifiers, $F3Key)) {
+    Write-Host "Failed to register the F3 hotkey ($F3Display). It may already be in use by another app." -ForegroundColor Red
+}
 
 # ---- Register one global hotkey per enabled Mode. IDs start at 100 so
 # they never collide with ToggleHotkeyId(1)/ExitHotkeyId(2), or with
@@ -656,6 +706,29 @@ function Test-RelayTextContains {
     if ([string]::IsNullOrEmpty($Needle)) { return $false }
     if ([string]::IsNullOrEmpty($Text)) { return $false }
     return ($Text.IndexOf($Needle, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+# Windows' RegisterHotKey doesn't distinguish left/right modifier keys -
+# Ctrl+Delete fires the same whether it's the left or right Ctrl held
+# down. For hotkeys flagged "right-side only" (the SQL Search and F3
+# defaults), this checks - at the moment the hotkey fires - whether the
+# RIGHT-hand variant of every modifier bit set in $Modifiers is actually
+# the one currently held, so a left-Ctrl+Delete press is ignored.
+function Test-RightModifierSatisfied {
+    param(
+        [int]$Modifiers,
+        [bool]$RequireRight
+    )
+    if (-not $RequireRight) { return $true }
+
+    $VK_RSHIFT   = 0xA1
+    $VK_RMENU    = 0xA5
+    $VK_RCONTROL = 0xA3
+
+    if (($Modifiers -band 0x0002) -ne 0 -and (([Win32]::GetAsyncKeyState($VK_RCONTROL) -band 0x8000) -eq 0)) { return $false }
+    if (($Modifiers -band 0x0001) -ne 0 -and (([Win32]::GetAsyncKeyState($VK_RMENU)    -band 0x8000) -eq 0)) { return $false }
+    if (($Modifiers -band 0x0004) -ne 0 -and (([Win32]::GetAsyncKeyState($VK_RSHIFT)   -band 0x8000) -eq 0)) { return $false }
+    return $true
 }
 
 # ---- Window picking: user clicks a window, we identify it, then a
@@ -846,6 +919,7 @@ Write-Host "AutoClipCapture is running." -ForegroundColor White
 Write-Host "  $ToggleDisplay  -> start/stop the capture loop" -ForegroundColor White
 Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $ExitDisplay  -> quit"
+Write-Host "  $F3Display  -> send a single F3 to the focused window"
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     $m = $ModeHotkeyMap[$hkId]
     Write-Host "  $($m.Hotkey.Display)  -> mode: $($m.Name)  (action key: $($m.ActionKeyDisplay))" -ForegroundColor White
@@ -1080,6 +1154,7 @@ $hotkeyAction = {
     param($sender, $id)
 
     if ($id -eq $ToggleHotkeyId) {
+        if (-not (Test-RightModifierSatisfied -Modifiers $ToggleModifiers -RequireRight $ToggleRequireRightModifier)) { return }
         if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
 
         if ($global:CR_ActiveAutomation -eq 'Relay') {
@@ -1149,12 +1224,27 @@ $hotkeyAction = {
         }
     }
     elseif ($id -eq $ExitHotkeyId) {
+        if (-not (Test-RightModifierSatisfied -Modifiers $ExitModifiers -RequireRight $ExitRequireRightModifier)) { return }
         Write-Host "[AutoClipCapture] Exiting..." -ForegroundColor Magenta
         [System.Windows.Forms.Application]::Exit()
     }
-    elseif ($ModeHotkeyMap.ContainsKey($id)) {
+    elseif ($id -eq $F3HotkeyId) {
+        if (-not (Test-RightModifierSatisfied -Modifiers $F3Modifiers -RequireRight $F3RequireRightModifier)) { return }
         if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
+        if ($null -ne $global:CR_ActiveAutomation) {
+            $busyName = if ($global:CR_ActiveModeConfig) { $global:CR_ActiveModeConfig.Name } else { $global:CR_ActiveAutomation }
+            Write-Host "[AutoClipCapture] Can't send F3 - '$busyName' is currently running." -ForegroundColor Yellow
+            return
+        }
+        # No window selection - simply assume the currently focused
+        # window is the intended target and send F3 straight to it.
+        [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
+        Write-Host "[AutoClipCapture] F3 sent to the focused window." -ForegroundColor Green
+    }
+    elseif ($ModeHotkeyMap.ContainsKey($id)) {
         $mode = $ModeHotkeyMap[$id]
+        if (-not (Test-RightModifierSatisfied -Modifiers ([int]$mode.Hotkey.Modifiers) -RequireRight ([bool]$mode.Hotkey.RequireRightModifier))) { return }
+        if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
 
         if ($global:CR_ActiveAutomation -eq $mode.Id) {
             Stop-ModeCapture
@@ -1170,18 +1260,33 @@ $hotkeyAction = {
         $global:CR_Selecting = $true
         try {
             $target = $null
-            while ($true) {
-                $picked = Select-TargetWindow
-                if ($null -eq $picked) {
-                    Write-Host "[AutoClipCapture] [$($mode.Name)] Start cancelled (no window selected)." -ForegroundColor Yellow
-                    Hide-RelayStatus
+            if ($mode.UseFocusedWindow) {
+                # Assume the window that already has focus is the
+                # target - no click-to-select or confirmation step.
+                $fgHandle = [Win32]::GetForegroundWindow()
+                if ($fgHandle -eq [IntPtr]::Zero) {
+                    Write-Host "[AutoClipCapture] [$($mode.Name)] Start cancelled (no focused window found)." -ForegroundColor Yellow
                     return
                 }
-                if (Confirm-TargetWindow -Title $picked.Title) {
-                    $target = $picked
-                    break
+                $sb = New-Object System.Text.StringBuilder 256
+                [void][Win32]::GetWindowText($fgHandle, $sb, $sb.Capacity)
+                $fgTitle = $sb.ToString()
+                if ([string]::IsNullOrWhiteSpace($fgTitle)) { $fgTitle = "(untitled window)" }
+                $target = [pscustomobject]@{ Handle = $fgHandle; Title = $fgTitle }
+            } else {
+                while ($true) {
+                    $picked = Select-TargetWindow
+                    if ($null -eq $picked) {
+                        Write-Host "[AutoClipCapture] [$($mode.Name)] Start cancelled (no window selected)." -ForegroundColor Yellow
+                        Hide-RelayStatus
+                        return
+                    }
+                    if (Confirm-TargetWindow -Title $picked.Title) {
+                        $target = $picked
+                        break
+                    }
+                    Write-Host "[AutoClipCapture] [$($mode.Name)] Selection rejected - click the correct window." -ForegroundColor Yellow
                 }
-                Write-Host "[AutoClipCapture] [$($mode.Name)] Selection rejected - click the correct window." -ForegroundColor Yellow
             }
 
             Hide-RelayResultOverlay
@@ -1212,6 +1317,7 @@ $form.Add_HotkeyPressed($hotkeyAction)
 $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
+[HotkeyForm]::UnregisterHotKey($FormHandle, $F3HotkeyId)     | Out-Null
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
 }
