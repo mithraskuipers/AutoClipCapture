@@ -67,6 +67,21 @@
                                 once more, up to a safety limit
                                 (MaxIterations) so a misconfigured
                                 mode can't loop forever.
+                         3. Once a definitive found/not-found answer
+                            is reached, the captured text is scanned
+                            for a line starting with "BROWSE" that has
+                            a component identifier in parentheses (2
+                            letters followed by a letter/number mix,
+                            e.g. "BROWSE (AB12C) ..."). That
+                            identifier and a Y/N for whether SQL was
+                            found get recorded as a row in a Markdown
+                            table file, component_sql_check.md
+                            (created next to your log file). Re-
+                            running the check on a component you've
+                            already scanned updates its existing row
+                            instead of adding a duplicate, so the
+                            table is a running, growing record of
+                            every component checked so far.
                        Pressing the same mode's hotkey again while it
                        is running cancels it. Only one mode (or the
                        Toggle relay) can run at a time. Modes
@@ -708,6 +723,91 @@ function Test-RelayTextContains {
     return ($Text.IndexOf($Needle, [StringComparison]::OrdinalIgnoreCase) -ge 0)
 }
 
+# ---- Component/SQL tracking (component_sql_check.md) ----
+#
+# The captured text for a scan Mode is expected to have a line near the
+# top starting with "BROWSE", containing a component identifier in
+# parentheses - e.g. "BROWSE (AB12C) Some Screen Title". The identifier
+# always starts with 2 letters, followed by a mix of letters/numbers.
+# This pulls that identifier out so the result (SQL found / not found)
+# can be recorded against it.
+function Get-ComponentIdFromText {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $null }
+
+    foreach ($line in ($Text -split "`r`n|`r|`n")) {
+        if ($line.TrimStart().StartsWith("BROWSE", [StringComparison]::OrdinalIgnoreCase)) {
+            $m = [System.Text.RegularExpressions.Regex]::Match($line, '\(([A-Za-z]{2}[A-Za-z0-9]+)\)')
+            if ($m.Success) {
+                return $m.Groups[1].Value
+            }
+        }
+    }
+    return $null
+}
+
+# Records one component's SQL-found result into a growing Markdown
+# table at component_sql_check.md (same folder as the configured log
+# file). If the component already has a row, that row is updated in
+# place rather than duplicated - so re-running the check on the same
+# page later just refreshes its Y/N instead of adding a second entry.
+# Brand-new components get appended, which is how the table grows over
+# time as more pages get scanned.
+function Update-ComponentSqlCheckFile {
+    param(
+        [string]$Text,
+        [bool]$SqlFound
+    )
+
+    $component = Get-ComponentIdFromText -Text $Text
+    if ([string]::IsNullOrWhiteSpace($component)) {
+        Write-Host "[AutoClipCapture] Component/SQL tracking: no 'BROWSE (...)' line found - skipping record." -ForegroundColor Yellow
+        return
+    }
+
+    $mark = if ($SqlFound) { 'Y' } else { 'N' }
+    $headerLine1 = '| Component | SQL |'
+    $headerLine2 = '|-----------|-----|'
+    $filePath = Join-Path $LogDir "component_sql_check.md"
+
+    try {
+        if (-not (Test-Path $filePath)) {
+            @($headerLine1, $headerLine2, "| $component | $mark |") |
+                Set-Content -Path $filePath -Encoding UTF8
+            Write-Host "[AutoClipCapture] component_sql_check.md created - added '$component' = $mark." -ForegroundColor Cyan
+            return
+        }
+
+        $lines = @(Get-Content -Path $filePath -Encoding UTF8)
+        if ($lines.Count -lt 2 -or $lines[0] -notmatch '^\|\s*Component\b') {
+            # File exists but doesn't look like our table (missing/odd
+            # header) - rebuild the header and keep any existing rows.
+            $dataRows = @($lines | Where-Object { $_ -match '^\|.*\|.*\|\s*$' -and $_ -ne $headerLine1 -and $_ -ne $headerLine2 })
+            $lines = @($headerLine1, $headerLine2) + $dataRows
+        }
+
+        $updated = $false
+        for ($i = 2; $i -lt $lines.Count; $i++) {
+            $cells = $lines[$i].Trim().Trim('|') -split '\|'
+            if ($cells.Count -ge 1 -and $cells[0].Trim() -eq $component) {
+                $lines[$i] = "| $component | $mark |"
+                $updated = $true
+                break
+            }
+        }
+
+        if (-not $updated) {
+            $lines += "| $component | $mark |"
+        }
+
+        Set-Content -Path $filePath -Value $lines -Encoding UTF8
+        $verb = if ($updated) { 'updated' } else { 'added' }
+        Write-Host "[AutoClipCapture] component_sql_check.md $verb - '$component' = $mark." -ForegroundColor Cyan
+    } catch {
+        Write-Host "[AutoClipCapture] Failed to update component_sql_check.md: $_" -ForegroundColor Red
+    }
+}
+
 # Windows' RegisterHotKey doesn't distinguish left/right modifier keys -
 # Ctrl+Delete fires the same whether it's the left or right Ctrl held
 # down. For hotkeys flagged "right-side only" (the SQL Search and F3
@@ -1019,11 +1119,13 @@ $tickAction = {
                         if ($foundMatch) {
                             Write-Host "[AutoClipCapture] [$($mode.Name)] '$($mode.FoundText)' found." -ForegroundColor Green
                             Show-RelayResultOverlay -Text $mode.FoundOverlayText -Color ([System.Drawing.Color]::LimeGreen)
+                            Update-ComponentSqlCheckFile -Text $text -SqlFound $true
                             Stop-ModeCapture
                         }
                         elseif ($notFoundMatch) {
                             Write-Host "[AutoClipCapture] [$($mode.Name)] Not-found phrase matched." -ForegroundColor Yellow
                             Show-RelayResultOverlay -Text $mode.NotFoundOverlayText -Color ([System.Drawing.Color]::OrangeRed)
+                            Update-ComponentSqlCheckFile -Text $text -SqlFound $false
                             Stop-ModeCapture
                         }
                         elseif ($global:CR_ModeIterations -ge [int]$mode.MaxIterations) {
