@@ -38,8 +38,8 @@
    [Exit hotkey]    -> Fully quits this script
 
    [Mode hotkeys]   -> Any number of extra "scan modes" can be defined,
-                       each bound to its own hotkey (Right Ctrl+Delete
-                       by default runs the built-in "SQL Search" mode).
+                       each bound to its own hotkey (Alt+> by default
+                       runs the built-in "SQL Search" mode).
                        Pressing a mode's hotkey:
                          1. If the mode is set to use the focused
                             window (the default for SQL Search), the
@@ -87,11 +87,13 @@
                        Toggle relay) can run at a time. Modes
                        themselves are no longer edited from the config
                        GUI - only their hotkeys are. A hotkey flagged
-                       "right-side only" (the SQL Search default) only
-                       fires when the physical RIGHT Ctrl/Alt/Shift key
-                       is the one held down.
+                       "right-side only" only fires when the physical
+                       RIGHT Ctrl/Alt/Shift key is the one held down
+                       (off by default for SQL Search and F3 now that
+                       they use Alt+Shift combos, since either side's
+                       Alt/Shift works fine for those).
 
-   [F3 hotkey]      -> Right Ctrl+End by default. Sends a single F3
+   [F3 hotkey]      -> Alt+< by default. Sends a single F3
                        keypress straight to whatever window already
                        has focus - no window selection, no loop, no
                        clipboard involved. Ignored while the Toggle
@@ -142,13 +144,13 @@ function Get-DefaultConfig {
         DupDetectThreshold    = 0.995   # 99.5%
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C"; RequireRightModifier = $false }  # Ctrl+Alt+C
         ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }  # Ctrl+Alt+X
-        F3Hotkey              = [pscustomobject]@{ Modifiers = 2; Key = 0x23; Display = "Ctrl+End"; RequireRightModifier = $true }     # Right Ctrl+End -> single F3 press
+        F3Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }     # Alt+Shift+Comma ('<') -> single F3 press
         ResultOverlayDurationMs = 4000
         Modes                 = @( Get-DefaultSqlSearchMode )
     }
 }
 
-# The default "scan mode" bound to Right Ctrl+Delete. Instead of the
+# The default "scan mode" bound to Alt+>. Instead of the
 # plain Toggle relay (Ctrl+Alt+C), this repeatedly presses F5, copies
 # the screen, and looks for "EXEC SQL" - showing a big SQL FOUND / NO
 # SQL FOUND banner once it knows the answer. UseFocusedWindow means it
@@ -159,7 +161,7 @@ function Get-DefaultSqlSearchMode {
         Id                  = "sql-search"
         Name                = "SQL Search"
         Enabled             = $true
-        Hotkey              = [pscustomobject]@{ Modifiers = 2; Key = 0x2E; Display = "Ctrl+Delete"; RequireRightModifier = $true }  # Right Ctrl+Delete
+        Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBE; Display = "Alt+>"; RequireRightModifier = $false }  # Alt+Shift+Period ('>')
         UseFocusedWindow    = $true
         ActionKeyToken      = "{F5}"
         ActionKeyDisplay    = "F5"
@@ -242,7 +244,7 @@ if ($Config.PSObject.Properties.Name -contains 'ResultOverlayDurationMs') {
 }
 
 # Older config files won't have a Modes array yet - fall back to the
-# built-in SQL Search mode (Right Ctrl+Delete) so it's available by
+# built-in SQL Search mode (Alt+>) so it's available by
 # default even for configs created before Modes existed.
 if ($Config.PSObject.Properties.Name -contains 'Modes' -and $null -ne $Config.Modes) {
     $ModeConfigs = @($Config.Modes)
@@ -809,11 +811,13 @@ function Update-ComponentSqlCheckFile {
 }
 
 # Windows' RegisterHotKey doesn't distinguish left/right modifier keys -
-# Ctrl+Delete fires the same whether it's the left or right Ctrl held
-# down. For hotkeys flagged "right-side only" (the SQL Search and F3
-# defaults), this checks - at the moment the hotkey fires - whether the
+# e.g. Ctrl+Delete fires the same whether it's the left or right Ctrl
+# held down. For any hotkey flagged "right-side only" in the config,
+# this checks - at the moment the hotkey fires - whether the
 # RIGHT-hand variant of every modifier bit set in $Modifiers is actually
-# the one currently held, so a left-Ctrl+Delete press is ignored.
+# the one currently held, so (for example) a left-Ctrl combo press is
+# ignored. Off by default for SQL Search and F3 now that they're
+# Alt+Shift combos, where either side works fine.
 function Test-RightModifierSatisfied {
     param(
         [int]$Modifiers,

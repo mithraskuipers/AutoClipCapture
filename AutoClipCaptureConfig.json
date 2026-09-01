@@ -22,10 +22,10 @@
                        "RequireRightModifier":  false
                    },
     "F3Hotkey":  {
-                     "Modifiers":  2,
-                     "Key":  35,
-                     "Display":  "Ctrl+End",
-                     "RequireRightModifier":  true
+                     "Modifiers":  5,
+                     "Key":  188,
+                     "Display":  "Alt+<",
+                     "RequireRightModifier":  false
                  },
     "ResultOverlayDurationMs":  4000,
     "Modes":  [
@@ -34,10 +34,10 @@
                       "Name":  "SQL Search",
                       "Enabled":  true,
                       "Hotkey":  {
-                                     "Modifiers":  2,
-                                     "Key":  46,
-                                     "Display":  "Ctrl+Delete",
-                                     "RequireRightModifier":  true
+                                     "Modifiers":  5,
+                                     "Key":  190,
+                                     "Display":  "Alt+>",
+                                     "RequireRightModifier":  false
                                  },
                       "UseFocusedWindow":  true,
                       "ActionKeyToken":  "{F5}",

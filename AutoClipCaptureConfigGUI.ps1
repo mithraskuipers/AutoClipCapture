@@ -28,8 +28,10 @@
  requires at least one modifier (Ctrl/Alt/Shift) - a bare key like
  "F9" alone isn't accepted for those. A hotkey can also be marked
  "right-side only", meaning it only fires when the physical RIGHT
- Ctrl/Alt/Shift key is the one held down (the default for SQL Search
- and F3, so a left-Ctrl combo used elsewhere doesn't collide).
+ Ctrl/Alt/Shift key is the one held down (useful if a left-hand combo
+ you use elsewhere would otherwise collide). SQL Search and F3 default
+ to Alt+> and Alt+< and don't require this, since either side's
+ Alt/Shift key works fine for those.
 
  The Toggle relay's ACTION KEY is different: it's just simulated as a
  keypress inside the target application, so it can be a single key
@@ -46,7 +48,7 @@ Add-Type -AssemblyName System.Drawing
 
 $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 
-# The default "scan mode" bound to Right Ctrl+Delete - see
+# The default "scan mode" bound to Alt+> - see
 # AutoClipCapture.ps1 for the exact loop this describes. Kept identical
 # to (and in sync with) the copy in AutoClipCapture.ps1 so a fresh
 # config looks the same whichever of the two scripts creates it first.
@@ -55,7 +57,7 @@ function Get-DefaultSqlSearchMode {
         Id                  = "sql-search"
         Name                = "SQL Search"
         Enabled             = $true
-        Hotkey              = [pscustomobject]@{ Modifiers = 2; Key = 0x2E; Display = "Ctrl+Delete"; RequireRightModifier = $true }  # Right Ctrl+Delete
+        Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBE; Display = "Alt+>"; RequireRightModifier = $false }  # Alt+Shift+Period ('>')
         UseFocusedWindow    = $true
         ActionKeyToken      = "{F5}"
         ActionKeyDisplay    = "F5"
@@ -82,7 +84,7 @@ function Get-DefaultConfig {
         DupDetectThreshold      = 0.995
         ToggleHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C"; RequireRightModifier = $false }
         ExitHotkey              = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }
-        F3Hotkey                = [pscustomobject]@{ Modifiers = 2; Key = 0x23; Display = "Ctrl+End"; RequireRightModifier = $true }  # Right Ctrl+End
+        F3Hotkey                = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }  # Alt+Shift+Comma ('<')
         ResultOverlayDurationMs = 4000
         Modes                   = @( Get-DefaultSqlSearchMode )
     }
