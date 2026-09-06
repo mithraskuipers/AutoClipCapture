@@ -99,6 +99,31 @@
                        clipboard involved. Ignored while the Toggle
                        relay or a scan mode is running.
 
+   [Pipeline hotkeys] -> Any number of multi-screen "Pipelines" can be
+                       defined, each bound to its own hotkey, for
+                       walking a full Screen1 (components) -> Screen2
+                       (environments) -> Screen3 (SQL search) tree
+                       instead of a single-screen scan Mode. For each
+                       component: try to zoom in (Component.ZoomActionToken);
+                       if the resulting screen still contains
+                       Component.UnavailableText, that component is
+                       skipped (Component.NextActionToken moves to the
+                       next one). Otherwise every environment is walked
+                       the same way (Environment.ZoomActionToken /
+                       Environment.UnavailableText / Environment.NextActionToken),
+                       and once an environment is available the existing
+                       SQL Search logic (the Sql block - same fields as
+                       a scan Mode) always runs. Results are recorded
+                       per (component, environment) pair in
+                       pipeline_sql_check.md. Going back a screen is
+                       always a single F3 press (never held/repeated),
+                       so a screen that treats repeated F3 as "back
+                       multiple screens" (e.g. out to a logout screen)
+                       stays safe. Pipelines are configured in
+                       AutoClipCaptureConfig.json (see the Pipelines
+                       array) - like Modes, they aren't edited from the
+                       config GUI.
+
  Duplicate-capture protection: each capture is compared to the one
  immediately before it. If they come back 99.5% identical (default;
  configurable), that usually means the target app has stopped handing
@@ -147,6 +172,7 @@ function Get-DefaultConfig {
         F3Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }     # Alt+Shift+Comma ('<') -> single F3 press
         ResultOverlayDurationMs = 4000
         Modes                 = @( Get-DefaultSqlSearchMode )
+        Pipelines             = @()
     }
 }
 
@@ -260,6 +286,51 @@ foreach ($m in $ModeConfigs) {
     }
     if ($null -ne $m.Hotkey -and -not ($m.Hotkey.PSObject.Properties.Name -contains 'RequireRightModifier')) {
         $m.Hotkey | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
+    }
+}
+
+# ---- Pipelines: multi-screen component/environment navigation runs.
+# Older config files won't have a Pipelines array yet - default to none.
+# Each pipeline's Component/Environment/Sql sub-objects are backfilled
+# with sane defaults for any field an older/hand-edited entry omits, so
+# nothing throws on a missing property. ----
+if ($Config.PSObject.Properties.Name -contains 'Pipelines' -and $null -ne $Config.Pipelines) {
+    $PipelineConfigs = @($Config.Pipelines)
+} else {
+    $PipelineConfigs = @()
+}
+
+function Add-PipelineLevelDefaults {
+    param($Level, [int]$DefaultMaxItems)
+    if ($null -eq $Level) { return $Level }
+    $defaults = @{
+        ZoomActionToken   = '{ENTER}'
+        ZoomActionDisplay = 'Enter'
+        NextActionToken   = '{DOWN}'
+        NextActionDisplay = 'Down'
+        UnavailableText   = 'unavailable'
+        MaxItems          = $DefaultMaxItems
+        LabelPattern      = '\(([A-Za-z]{2}[A-Za-z0-9]+)\)'
+    }
+    foreach ($key in $defaults.Keys) {
+        if (-not ($Level.PSObject.Properties.Name -contains $key)) {
+            $Level | Add-Member -NotePropertyName $key -NotePropertyValue $defaults[$key] -Force
+        }
+    }
+    return $Level
+}
+
+foreach ($p in $PipelineConfigs) {
+    if (-not ($p.PSObject.Properties.Name -contains 'UseFocusedWindow')) {
+        $p | Add-Member -NotePropertyName UseFocusedWindow -NotePropertyValue $false -Force
+    }
+    if ($null -ne $p.Hotkey -and -not ($p.Hotkey.PSObject.Properties.Name -contains 'RequireRightModifier')) {
+        $p.Hotkey | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
+    }
+    [void](Add-PipelineLevelDefaults -Level $p.Component -DefaultMaxItems 100)
+    [void](Add-PipelineLevelDefaults -Level $p.Environment -DefaultMaxItems 20)
+    if ($null -ne $p.Sql -and -not ($p.Sql.PSObject.Properties.Name -contains 'MaxIterations')) {
+        $p.Sql | Add-Member -NotePropertyName MaxIterations -NotePropertyValue 500 -Force
     }
 }
 
@@ -612,6 +683,30 @@ foreach ($m in $ModeConfigs) {
     $ModeHotkeyMap[$hkId] = $m
 }
 
+# ---- Register one global hotkey per enabled Pipeline. IDs start well
+# clear of the Mode range above so the two never collide regardless of
+# how many of either exist. $PipelineHotkeyMap maps hotkey id -> the
+# pipeline's config object, for the hotkey handler below. ----
+$PipelineHotkeyMap  = @{}
+$PipelineHotkeyBase = 5000
+$pipelineIndex = 0
+foreach ($p in $PipelineConfigs) {
+    $pipelineIndex++
+    if (-not $p.Enabled) { continue }
+    if ($null -eq $p.Hotkey -or $null -eq $p.Hotkey.Key -or [int]$p.Hotkey.Key -eq 0) {
+        Write-Host "Pipeline '$($p.Name)' has no hotkey assigned - skipping." -ForegroundColor Yellow
+        continue
+    }
+    $hkId  = $PipelineHotkeyBase + $pipelineIndex
+    $pMods = [int]$p.Hotkey.Modifiers
+    $pKey  = [int]$p.Hotkey.Key
+    if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $hkId, $pMods, $pKey)) {
+        Write-Host "Failed to register the hotkey for pipeline '$($p.Name)' ($($p.Hotkey.Display)). It may already be in use." -ForegroundColor Red
+        continue
+    }
+    $PipelineHotkeyMap[$hkId] = $p
+}
+
 # ---- Top-left status overlay: a tiny always-on-top banner that never
 # steals keyboard focus (StatusOverlay overrides ShowWithoutActivation
 # and adds WS_EX_NOACTIVATE), so showing/updating it never interrupts
@@ -748,6 +843,33 @@ function Get-ComponentIdFromText {
     return $null
 }
 
+# Generic version of the above used by Pipelines: searches the whole
+# captured text (not just a "BROWSE" line) for the first match of a
+# configurable regex Pattern, and falls back to a positional label
+# (e.g. "Component 3") when nothing matches - so a pipeline still
+# produces a usable results table even on a screen whose text doesn't
+# match the pattern.
+function Get-PipelineItemLabel {
+    param(
+        [string]$Text,
+        [string]$Pattern,
+        [string]$FallbackLabel
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Pattern) -and -not [string]::IsNullOrEmpty($Text)) {
+        try {
+            $m = [System.Text.RegularExpressions.Regex]::Match($Text, $Pattern)
+            if ($m.Success) {
+                if ($m.Groups.Count -gt 1) { return $m.Groups[1].Value }
+                return $m.Value
+            }
+        } catch {
+            # Bad/unsupported regex in config - fall through to the
+            # positional fallback rather than crashing the pipeline.
+        }
+    }
+    return $FallbackLabel
+}
+
 # Records one component's SQL-found result into a growing Markdown
 # table at component_sql_check.md (same folder as the configured log
 # file). If the component already has a row, that row is updated in
@@ -807,6 +929,58 @@ function Update-ComponentSqlCheckFile {
         Write-Host "[AutoClipCapture] component_sql_check.md $verb - '$component' = $mark." -ForegroundColor Cyan
     } catch {
         Write-Host "[AutoClipCapture] Failed to update component_sql_check.md: $_" -ForegroundColor Red
+    }
+}
+
+# Same idea as Update-ComponentSqlCheckFile, but for Pipeline runs,
+# which check SQL per (Component, Environment) pair rather than per
+# component alone. Kept in its own file (pipeline_sql_check.md) so it
+# never collides with the classic SQL Search mode's table.
+function Update-PipelineSqlCheckFile {
+    param(
+        [string]$Component,
+        [string]$Environment,
+        [bool]$SqlFound
+    )
+
+    $mark = if ($SqlFound) { 'Y' } else { 'N' }
+    $headerLine1 = '| Component | Environment | SQL |'
+    $headerLine2 = '|-----------|-------------|-----|'
+    $filePath = Join-Path $LogDir "pipeline_sql_check.md"
+
+    try {
+        if (-not (Test-Path $filePath)) {
+            @($headerLine1, $headerLine2, "| $Component | $Environment | $mark |") |
+                Set-Content -Path $filePath -Encoding UTF8
+            Write-Host "[AutoClipCapture] pipeline_sql_check.md created - added '$Component / $Environment' = $mark." -ForegroundColor Cyan
+            return
+        }
+
+        $lines = @(Get-Content -Path $filePath -Encoding UTF8)
+        if ($lines.Count -lt 2 -or $lines[0] -notmatch '^\|\s*Component\b') {
+            $dataRows = @($lines | Where-Object { $_ -match '^\|.*\|.*\|.*\|\s*$' -and $_ -ne $headerLine1 -and $_ -ne $headerLine2 })
+            $lines = @($headerLine1, $headerLine2) + $dataRows
+        }
+
+        $updated = $false
+        for ($i = 2; $i -lt $lines.Count; $i++) {
+            $cells = $lines[$i].Trim().Trim('|') -split '\|'
+            if ($cells.Count -ge 2 -and $cells[0].Trim() -eq $Component -and $cells[1].Trim() -eq $Environment) {
+                $lines[$i] = "| $Component | $Environment | $mark |"
+                $updated = $true
+                break
+            }
+        }
+
+        if (-not $updated) {
+            $lines += "| $Component | $Environment | $mark |"
+        }
+
+        Set-Content -Path $filePath -Value $lines -Encoding UTF8
+        $verb = if ($updated) { 'updated' } else { 'added' }
+        Write-Host "[AutoClipCapture] pipeline_sql_check.md $verb - '$Component / $Environment' = $mark." -ForegroundColor Cyan
+    } catch {
+        Write-Host "[AutoClipCapture] Failed to update pipeline_sql_check.md: $_" -ForegroundColor Red
     }
 }
 
@@ -989,6 +1163,25 @@ function Stop-ModeCapture {
     Hide-RelayStatus
 }
 
+# Mirrors Stop-ModeCapture, but for a running Pipeline. Called when a
+# pipeline runs out of components (finished) and when its hotkey is
+# pressed again to cancel it manually.
+function Stop-PipelineCapture {
+    $timer.Stop()
+    $global:CR_ActiveAutomation      = $null
+    $global:CR_ActivePipelineConfig  = $null
+    $global:CR_PipelineState         = 'CompZoom_Action'
+    $global:CR_ElapsedMs             = 0
+    $global:CR_PipelineComponentIdx  = 0
+    $global:CR_PipelineEnvironmentIdx = 0
+    $global:CR_PipelineSqlIterations = 0
+    $global:CR_PipelineAfterBack     = $null
+    $global:CR_PipelineComponentLabel   = $null
+    $global:CR_PipelineEnvironmentLabel = $null
+    $global:CR_TargetHandle          = [IntPtr]::Zero
+    Hide-RelayStatus
+}
+
 # Brings the target window to the foreground before an automated key is
 # sent to it. Returns $false if the window no longer exists.
 function Set-RelayForeground {
@@ -1028,6 +1221,10 @@ foreach ($hkId in $ModeHotkeyMap.Keys) {
     $m = $ModeHotkeyMap[$hkId]
     Write-Host "  $($m.Hotkey.Display)  -> mode: $($m.Name)  (action key: $($m.ActionKeyDisplay))" -ForegroundColor White
 }
+foreach ($hkId in $PipelineHotkeyMap.Keys) {
+    $p = $PipelineHotkeyMap[$hkId]
+    Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
+}
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
 Write-Host "Config:     $ConfigPath"
@@ -1060,11 +1257,300 @@ $global:CR_ActiveModeConfig = $null
 $global:CR_ModeState        = 'Action'   # Action -> PostAction -> PostCopy -> Action ...
 $global:CR_ModeIterations   = 0
 
+# $null = no Pipeline running, otherwise the running Pipeline's config
+# object (also referenced via $global:CR_ActiveAutomation = pipeline.Id,
+# same convention as Modes). See the tick handler below for the full
+# CompZoom -> CompNext / EnvZoom -> EnvNext / Sql -> Back state chain.
+$global:CR_ActivePipelineConfig     = $null
+$global:CR_PipelineState            = 'CompZoom_Action'
+$global:CR_PipelineComponentIdx     = 0
+$global:CR_PipelineEnvironmentIdx   = 0
+$global:CR_PipelineSqlIterations    = 0
+$global:CR_PipelineAfterBack        = $null   # state to resume at once the single F3 "back" completes
+$global:CR_PipelineComponentLabel   = $null
+$global:CR_PipelineEnvironmentLabel = $null
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
 
 $tickAction = {
     if ($null -eq $global:CR_ActiveAutomation) { return }
+
+    if ($null -ne $global:CR_ActivePipelineConfig) {
+        # ---- A Pipeline is running (component -> environment -> SQL
+        # search, screen by screen); the classic Relay and single-level
+        # scan Mode state machines below are both skipped entirely while
+        # this is the case. ----
+        try {
+            $pipeline = $global:CR_ActivePipelineConfig
+            $comp = $pipeline.Component
+            $envLevel  = $pipeline.Environment
+            $sql  = $pipeline.Sql
+
+            switch ($global:CR_PipelineState) {
+                # ---- Screen 1: try to zoom into the current component ----
+                'CompZoom_Action' {
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Component $($global:CR_PipelineComponentIdx + 1): zooming in" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($comp.ZoomActionToken)
+                    $global:CR_PipelineState = 'CompZoom_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'CompZoom_Wait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                            Stop-PipelineCapture
+                            return
+                        }
+                        [System.Windows.Forms.SendKeys]::SendWait('^c')
+                        $global:CR_PipelineState = 'CompZoom_Copy'
+                        $global:CR_ElapsedMs = 0
+                    }
+                }
+                'CompZoom_Copy' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                        $text = ''
+                        try {
+                            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                                $text = [System.Windows.Forms.Clipboard]::GetText()
+                            }
+                        } catch {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                        }
+
+                        if (Test-RelayTextContains -Text $text -Needle $comp.UnavailableText) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component $($global:CR_PipelineComponentIdx + 1) unavailable - skipping." -ForegroundColor Yellow
+                            $global:CR_PipelineState = 'CompNext_Action'
+                            $global:CR_ElapsedMs = 0
+                        } else {
+                            $global:CR_PipelineComponentLabel = Get-PipelineItemLabel -Text $text -Pattern $comp.LabelPattern -FallbackLabel "Component $($global:CR_PipelineComponentIdx + 1)"
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component '$($global:CR_PipelineComponentLabel)' available - entering environments." -ForegroundColor Green
+                            $global:CR_PipelineEnvironmentIdx = 0
+                            $global:CR_PipelineState = 'EnvZoom_Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                    }
+                }
+                # ---- Back on screen 1: move to the next component ----
+                'CompNext_Action' {
+                    $global:CR_PipelineComponentIdx++
+                    if ($global:CR_PipelineComponentIdx -ge [int]$comp.MaxItems) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] All components processed." -ForegroundColor Cyan
+                        Show-RelayResultOverlay -Text "PIPELINE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Next component" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($comp.NextActionToken)
+                    $global:CR_PipelineState = 'CompNext_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'CompNext_Wait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        $global:CR_PipelineState = 'CompZoom_Action'
+                    }
+                }
+
+                # ---- Screen 2: try to zoom into the current environment ----
+                'EnvZoom_Action' {
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Environment $($global:CR_PipelineEnvironmentIdx + 1): zooming in" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($envLevel.ZoomActionToken)
+                    $global:CR_PipelineState = 'EnvZoom_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'EnvZoom_Wait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                            Stop-PipelineCapture
+                            return
+                        }
+                        [System.Windows.Forms.SendKeys]::SendWait('^c')
+                        $global:CR_PipelineState = 'EnvZoom_Copy'
+                        $global:CR_ElapsedMs = 0
+                    }
+                }
+                'EnvZoom_Copy' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                        $text = ''
+                        try {
+                            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                                $text = [System.Windows.Forms.Clipboard]::GetText()
+                            }
+                        } catch {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                        }
+
+                        if (Test-RelayTextContains -Text $text -Needle $envLevel.UnavailableText) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Environment $($global:CR_PipelineEnvironmentIdx + 1) unavailable - skipping." -ForegroundColor Yellow
+                            $global:CR_PipelineState = 'EnvNext_Action'
+                            $global:CR_ElapsedMs = 0
+                        } else {
+                            $global:CR_PipelineEnvironmentLabel = Get-PipelineItemLabel -Text $text -Pattern $envLevel.LabelPattern -FallbackLabel "Environment $($global:CR_PipelineEnvironmentIdx + 1)"
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Environment '$($global:CR_PipelineEnvironmentLabel)' available - running SQL search." -ForegroundColor Green
+                            $global:CR_PipelineSqlIterations = 0
+                            $global:CR_PipelineState = 'Sql_Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                    }
+                }
+                # ---- Back on screen 2: move to the next environment, or
+                # (once they're exhausted) back out to screen 1 ----
+                'EnvNext_Action' {
+                    $global:CR_PipelineEnvironmentIdx++
+                    if ($global:CR_PipelineEnvironmentIdx -ge [int]$envLevel.MaxItems) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] All environments processed for '$($global:CR_PipelineComponentLabel)' - returning to components." -ForegroundColor Cyan
+                        $global:CR_PipelineAfterBack = 'CompNext_Action'
+                        $global:CR_PipelineState = 'Back_Action'
+                        $global:CR_ElapsedMs = 0
+                        return
+                    }
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Next environment" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($envLevel.NextActionToken)
+                    $global:CR_PipelineState = 'EnvNext_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'EnvNext_Wait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        $global:CR_PipelineState = 'EnvZoom_Action'
+                    }
+                }
+
+                # ---- Screen 3: the existing SQL search logic, always run
+                # once an environment is available. Mirrors the per-Mode
+                # Action/PostAction/PostCopy loop above, just nested. ----
+                'Sql_Action' {
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Sending $($sql.ActionKeyDisplay)" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($sql.ActionKeyToken)
+                    $global:CR_PipelineState = 'Sql_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'Sql_Wait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                            Stop-PipelineCapture
+                            return
+                        }
+                        Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Copying (Ctrl+C)" ([System.Drawing.Color]::Lime)
+                        [System.Windows.Forms.SendKeys]::SendWait('^c')
+                        $global:CR_PipelineState = 'Sql_Copy'
+                        $global:CR_ElapsedMs = 0
+                    }
+                }
+                'Sql_Copy' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                        $text = ''
+                        try {
+                            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                                $text = [System.Windows.Forms.Clipboard]::GetText()
+                            }
+                        } catch {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                        }
+
+                        $global:CR_PipelineSqlIterations++
+
+                        $foundMatch    = Test-RelayTextContains -Text $text -Needle $sql.FoundText
+                        $notFoundMatch = (Test-RelayTextContains -Text $text -Needle $sql.NotFoundText) -or
+                                         (Test-RelayTextContains -Text $text -Needle $sql.TerminalText)
+
+                        if ($foundMatch) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] '$($sql.FoundText)' found for '$($global:CR_PipelineComponentLabel) / $($global:CR_PipelineEnvironmentLabel)'." -ForegroundColor Green
+                            Show-RelayResultOverlay -Text $sql.FoundOverlayText -Color ([System.Drawing.Color]::LimeGreen)
+                            Update-PipelineSqlCheckFile -Component $global:CR_PipelineComponentLabel -Environment $global:CR_PipelineEnvironmentLabel -SqlFound $true
+                            $global:CR_PipelineAfterBack = 'EnvNext_Action'
+                            $global:CR_PipelineState = 'Back_Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                        elseif ($notFoundMatch) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Not-found phrase matched for '$($global:CR_PipelineComponentLabel) / $($global:CR_PipelineEnvironmentLabel)'." -ForegroundColor Yellow
+                            Show-RelayResultOverlay -Text $sql.NotFoundOverlayText -Color ([System.Drawing.Color]::OrangeRed)
+                            Update-PipelineSqlCheckFile -Component $global:CR_PipelineComponentLabel -Environment $global:CR_PipelineEnvironmentLabel -SqlFound $false
+                            $global:CR_PipelineAfterBack = 'EnvNext_Action'
+                            $global:CR_PipelineState = 'Back_Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                        elseif ($global:CR_PipelineSqlIterations -ge [int]$sql.MaxIterations) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] SQL search stopped - safety limit of $($sql.MaxIterations) iterations reached." -ForegroundColor Yellow
+                            Show-RelayResultOverlay -Text "STOPPED (limit reached)" -Color ([System.Drawing.Color]::Gray)
+                            $global:CR_PipelineAfterBack = 'EnvNext_Action'
+                            $global:CR_PipelineState = 'Back_Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                        else {
+                            $global:CR_PipelineState = 'Sql_Action'
+                            $global:CR_ElapsedMs = 0
+                        }
+                    }
+                }
+
+                # ---- Single F3 press back to the previous screen, then
+                # resume wherever the caller queued up via AfterBack.
+                # Always exactly one press - never held/repeated - so a
+                # screen that treats repeated F3 as "back multiple
+                # screens" (e.g. all the way out to a logout screen)
+                # stays safe regardless of which level triggered it. ----
+                'Back_Action' {
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Returning ($F3Display)" ([System.Drawing.Color]::Orange)
+                    [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
+                    $global:CR_PipelineState = 'Back_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'Back_Wait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        $global:CR_PipelineState     = $global:CR_PipelineAfterBack
+                        $global:CR_PipelineAfterBack = $null
+                        $global:CR_ElapsedMs         = 0
+                    }
+                }
+            }
+        } catch {
+            Write-Host "[AutoClipCapture] [$($global:CR_ActivePipelineConfig.Name)] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
+            $global:CR_PipelineState = 'CompZoom_Action'
+            $global:CR_ElapsedMs = 0
+        }
+        return
+    }
 
     if ($global:CR_ActiveAutomation -ne 'Relay') {
         # ---- A scan Mode is running; the classic Relay state machine
@@ -1413,6 +1899,77 @@ $hotkeyAction = {
             $global:CR_Selecting = $false
         }
     }
+    elseif ($PipelineHotkeyMap.ContainsKey($id)) {
+        $pipeline = $PipelineHotkeyMap[$id]
+        if (-not (Test-RightModifierSatisfied -Modifiers ([int]$pipeline.Hotkey.Modifiers) -RequireRight ([bool]$pipeline.Hotkey.RequireRightModifier))) { return }
+        if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
+
+        if ($global:CR_ActiveAutomation -eq $pipeline.Id) {
+            Stop-PipelineCapture
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Cancelled." -ForegroundColor Cyan
+            return
+        }
+        if ($null -ne $global:CR_ActiveAutomation) {
+            $busyName = if ($global:CR_ActiveModeConfig) { $global:CR_ActiveModeConfig.Name } elseif ($global:CR_ActivePipelineConfig) { $global:CR_ActivePipelineConfig.Name } else { $global:CR_ActiveAutomation }
+            Write-Host "[AutoClipCapture] Can't start pipeline '$($pipeline.Name)' - '$busyName' is currently running." -ForegroundColor Yellow
+            return
+        }
+
+        $global:CR_Selecting = $true
+        try {
+            $target = $null
+            if ($pipeline.UseFocusedWindow) {
+                # Assume the window that already has focus is the
+                # target - no click-to-select or confirmation step.
+                $fgHandle = [Win32]::GetForegroundWindow()
+                if ($fgHandle -eq [IntPtr]::Zero) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled (no focused window found)." -ForegroundColor Yellow
+                    return
+                }
+                $sb = New-Object System.Text.StringBuilder 256
+                [void][Win32]::GetWindowText($fgHandle, $sb, $sb.Capacity)
+                $fgTitle = $sb.ToString()
+                if ([string]::IsNullOrWhiteSpace($fgTitle)) { $fgTitle = "(untitled window)" }
+                $target = [pscustomobject]@{ Handle = $fgHandle; Title = $fgTitle }
+            } else {
+                while ($true) {
+                    $picked = Select-TargetWindow
+                    if ($null -eq $picked) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled (no window selected)." -ForegroundColor Yellow
+                        Hide-RelayStatus
+                        return
+                    }
+                    if (Confirm-TargetWindow -Title $picked.Title) {
+                        $target = $picked
+                        break
+                    }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Selection rejected - click the correct window." -ForegroundColor Yellow
+                }
+            }
+
+            Hide-RelayResultOverlay
+            $global:CR_TargetHandle             = $target.Handle
+            $global:CR_TargetTitle              = $target.Title
+            $global:CR_ActiveAutomation         = $pipeline.Id
+            $global:CR_ActivePipelineConfig     = $pipeline
+            $global:CR_PipelineState            = 'CompZoom_Action'
+            $global:CR_ElapsedMs                = 0
+            $global:CR_PipelineComponentIdx     = 0
+            $global:CR_PipelineEnvironmentIdx   = 0
+            $global:CR_PipelineSqlIterations    = 0
+            $global:CR_PipelineAfterBack        = $null
+            $global:CR_PipelineComponentLabel   = $null
+            $global:CR_PipelineEnvironmentLabel = $null
+
+            $timer.Stop()
+            $timer.Start()
+
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
+            Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting..." ([System.Drawing.Color]::Lime)
+        } finally {
+            $global:CR_Selecting = $false
+        }
+    }
 }
 
 $form.Add_HotkeyPressed($hotkeyAction)
@@ -1425,6 +1982,9 @@ $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $F3HotkeyId)     | Out-Null
 foreach ($hkId in $ModeHotkeyMap.Keys) {
+    [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
+}
+foreach ($hkId in $PipelineHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
 }
 $statusForm.Dispose()

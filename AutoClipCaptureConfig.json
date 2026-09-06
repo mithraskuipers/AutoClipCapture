@@ -49,5 +49,47 @@
                       "NotFoundOverlayText":  "NO SQL FOUND",
                       "MaxIterations":  500
                   }
-              ]
+              ],
+    "Pipelines":  [
+                      {
+                          "Id":  "cobol-pipeline",
+                          "Name":  "COBOL Full Scan",
+                          "Enabled":  true,
+                          "Hotkey":  {
+                                         "Modifiers":  5,
+                                         "Key":  191,
+                                         "Display":  "Alt+?",
+                                         "RequireRightModifier":  false
+                                     },
+                          "UseFocusedWindow":  true,
+                          "Component":  {
+                                            "ZoomActionToken":  "{ENTER}",
+                                            "ZoomActionDisplay":  "Enter",
+                                            "NextActionToken":  "{DOWN}",
+                                            "NextActionDisplay":  "Down",
+                                            "UnavailableText":  "unavailable",
+                                            "MaxItems":  100,
+                                            "LabelPattern":  "\\(([A-Za-z]{2}[A-Za-z0-9]+)\\)"
+                                        },
+                          "Environment":  {
+                                              "ZoomActionToken":  "{ENTER}",
+                                              "ZoomActionDisplay":  "Enter",
+                                              "NextActionToken":  "{DOWN}",
+                                              "NextActionDisplay":  "Down",
+                                              "UnavailableText":  "unavailable",
+                                              "MaxItems":  20,
+                                              "LabelPattern":  "\\(([A-Za-z]{2}[A-Za-z0-9]+)\\)"
+                                          },
+                          "Sql":  {
+                                      "ActionKeyToken":  "{F5}",
+                                      "ActionKeyDisplay":  "F5",
+                                      "FoundText":  "EXEC SQL",
+                                      "FoundOverlayText":  "SQL FOUND",
+                                      "NotFoundText":  "No CHARS 'sql' found",
+                                      "TerminalText":  "*Bottom of data reached*",
+                                      "NotFoundOverlayText":  "NO SQL FOUND",
+                                      "MaxIterations":  500
+                                  }
+                      }
+                  ]
 }
