@@ -161,8 +161,8 @@ if ($targets.Count -gt 1) {
 # selection field where the action letter (e.g. "B") gets typed is
 # always columns 2-3. We click the left edge of that field (column 2).
 $cobColumn = 5
-$clickTargetColumn = 2
-$clickColumnOffset = $clickTargetColumn - $cobColumn   # -3
+$clickTargetColumn = 3
+$clickColumnOffset = $clickTargetColumn - $cobColumn   # -2
 $chosenPipeline.Screen1Select.ClickColumnOffset = $clickColumnOffset
 
 # ---- Pick the target window from a list (no clicking required) ----

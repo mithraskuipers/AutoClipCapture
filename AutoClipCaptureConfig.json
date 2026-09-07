@@ -78,7 +78,7 @@
                                                 "RowPrefixText":  "COB",
                                                 "ActionKeyChar":  "B",
                                                 "ActionKeyEnterToken":  "{ENTER}",
-                                                "ClickColumnOffset":  -1,
+                                                "ClickColumnOffset":  -2,
                                                 "OriginX":  0,
                                                 "OriginY":  0,
                                                 "CharWidthPx":  0,
