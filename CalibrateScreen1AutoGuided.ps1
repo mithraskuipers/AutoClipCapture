@@ -194,33 +194,23 @@ if ($clientW -le 0 -or $clientH -le 0) {
 $cols = 80
 $rows = 32
 $firstDataRow = 7   # first 6 rows are skipped as header, so the first data row is row 7
-$rowsDown = 10      # how far down we sample to work out character height
 Write-Host "`nTerminal display fixed at $cols columns x $rows rows. 'COB' at column $cobColumn, click target at column $clickTargetColumn, first data row $firstDataRow." -ForegroundColor Cyan
 
-$charWidthGuess = $clientW / $cols
-$charHeightGuess = $clientH / $rows
+# Character size comes straight from the window's pixel size divided
+# by the known 80x32 grid - no separate checkpoint needed for this,
+# since there's nothing on-screen to visually judge "10 rows down"
+# against anyway.
+$CharWidthPx = [math]::Round(($clientW / $cols), 2)
+$CharHeightPx = [math]::Round(($clientH / $rows), 2)
 
 $targetColIndex = ($cobColumn - 1) + $clickColumnOffset
-$originX = ($targetColIndex * $charWidthGuess) + ($charWidthGuess / 2)
-$originY = (($firstDataRow - 1) * $charHeightGuess) + ($charHeightGuess / 2)
+$originX = ($targetColIndex * $CharWidthPx) + ($CharWidthPx / 2)
+$originY = (($firstDataRow - 1) * $CharHeightPx) + ($CharHeightPx / 2)
 
-# ---- Step 1: confirm the origin point ----
+# ---- The one check you can actually judge by eye: does the pointer ----
+# ---- land next to the real, visible "COB" text? ----
 Confirm-Point -Handle $targetHandle -X ([ref]$originX) -Y ([ref]$originY) -AxisMode 'both' `
-    -Instruction "STEP 1 of 3: Look at the terminal. Is the pointer on the first data row, one column left of 'COB'?"
-
-# ---- Step 2: confirm a point further down (fixes CharHeightPx) ----
-$pointDownX = $originX
-$pointDownY = $originY + ($charHeightGuess * $rowsDown)
-Confirm-Point -Handle $targetHandle -X ([ref]$pointDownX) -Y ([ref]$pointDownY) -AxisMode 'vertical' `
-    -Instruction "STEP 2 of 3: Is the pointer $rowsDown rows further down, same column? (only up/down matters here)"
-$CharHeightPx = [math]::Round((($pointDownY - $originY) / $rowsDown), 2)
-
-# ---- Step 3: confirm a point one column right (fixes CharWidthPx) ----
-$pointRightX = $originX + $charWidthGuess
-$pointRightY = $originY
-Confirm-Point -Handle $targetHandle -X ([ref]$pointRightX) -Y ([ref]$pointRightY) -AxisMode 'horizontal' `
-    -Instruction "STEP 3 of 3: Is the pointer one column to the right of step 1, same row? (only left/right matters here)"
-$CharWidthPx = [math]::Round(($pointRightX - $originX), 2)
+    -Instruction "Look at the terminal. Is the pointer on the first data row, one column left of 'COB'? Nudge if not, then Enter."
 
 $OriginX = [math]::Round($originX)
 $OriginY = [math]::Round($originY)
@@ -233,6 +223,7 @@ Write-Host ("  OriginX       = {0}" -f $OriginX)
 Write-Host ("  OriginY       = {0}" -f $OriginY)
 Write-Host ("  CharWidthPx   = {0}" -f $CharWidthPx)
 Write-Host ("  CharHeightPx  = {0}" -f $CharHeightPx)
+
 
 if ($CharWidthPx -le 0 -or $CharHeightPx -le 0) {
     Write-Host "`nCharWidthPx or CharHeightPx came out zero or negative - step 2 or 3 wasn't actually" -ForegroundColor Red
