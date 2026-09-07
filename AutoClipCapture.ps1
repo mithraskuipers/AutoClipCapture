@@ -1851,6 +1851,26 @@ $hotkeyAction = {
 
             $useComponentList = ($null -ne $pipeline.ComponentList) -and [bool]$pipeline.ComponentList.Enabled
 
+            # When this pipeline's component-list pre-pass is enabled,
+            # ask for the output filename now (same prompt/validation
+            # as the classic Toggle relay's Show-FilenamePrompt), rather
+            # than always writing to the fixed name from config. The
+            # configured OutputFileName is still used as the suggested
+            # default text in the box.
+            $listOutputPath = $null
+            if ($useComponentList) {
+                $defaultListBase = [System.IO.Path]::GetFileNameWithoutExtension($pipeline.ComponentList.OutputFileName)
+                $listName = Show-FilenamePrompt -DefaultName $defaultListBase -TargetTitle $target.Title
+                if ($null -eq $listName) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled (no filename entered)." -ForegroundColor Yellow
+                    Hide-RelayStatus
+                    return
+                }
+                $safeListName = Get-SafeFileName $listName
+                if (-not $safeListName.ToLower().EndsWith('.txt')) { $safeListName += '.txt' }
+                $listOutputPath = Join-Path $LogDir $safeListName
+            }
+
             Hide-RelayResultOverlay
             $global:CR_TargetHandle             = $target.Handle
             $global:CR_TargetTitle              = $target.Title
@@ -1867,7 +1887,7 @@ $hotkeyAction = {
             $global:CR_PipelineCurrentScreen    = 0
             $global:CR_PipelineListPageIdx      = 0
             $global:CR_PipelineListPrevFiltered = $null
-            $global:CR_PipelineListOutputPath   = if ($useComponentList) { Join-Path $LogDir $pipeline.ComponentList.OutputFileName } else { $null }
+            $global:CR_PipelineListOutputPath   = $listOutputPath
 
             $timer.Stop()
             $timer.Start()
