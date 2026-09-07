@@ -445,6 +445,8 @@ using System.Text;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
 public static class Win32
 {
     [DllImport("user32.dll")]
@@ -491,6 +493,16 @@ public static class Win32
     // touching the window's actual on-screen position itself.
     [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr hWnd, ref System.Drawing.Point lpPoint);
+
+    // ScreenToClient/GetClientRect - used by the Screen1Select "quick
+    // position check" (Invoke-Screen1SelectQuickCalibration) to turn
+    // the user's current mouse position into a client-relative point
+    // and to measure the target window's client pixel size.
+    [DllImport("user32.dll")]
+    public static extern bool ScreenToClient(IntPtr hWnd, ref System.Drawing.Point lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int X, int Y);
@@ -1927,17 +1939,16 @@ $hotkeyAction = {
                 $listOutputPath = Join-Path $LogDir $safeListName
             }
 
-            # Fail fast rather than run the whole component-list pass
-            # and rewind only to click nonsense: Screen1Select's grid
-            # calibration (OriginX/OriginY/CharWidthPx/CharHeightPx)
-            # can't be derived automatically - see the header comment
-            # in AutoClipCaptureSqlPipelineScreen1Select.ps1 and
-            # CalibrateScreen1ClickPosition.ps1 for how to measure it.
+            # Screen1Select's click grid (OriginX/OriginY/CharWidthPx/
+            # CharHeightPx) depends on exactly where/how big the
+            # terminal window is right now, so it's measured fresh
+            # every time via a quick "hover here, click OK" check
+            # instead of a separate one-time calibration script/session
+            # - see Invoke-Screen1SelectQuickCalibration in
+            # AutoClipCaptureSqlPipelineScreen1Select.ps1.
             $selCfg = $pipeline.Screen1Select
             if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-                if ([double]$selCfg.CharWidthPx -le 0 -or [double]$selCfg.CharHeightPx -le 0) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled - Screen1Select isn't calibrated yet (CharWidthPx/CharHeightPx are 0)." -ForegroundColor Red
-                    Write-Host "  Run CalibrateScreen1ClickPosition.ps1 to measure OriginX/OriginY/CharWidthPx/CharHeightPx, then fill them into this pipeline's Screen1Select block in $ConfigPath." -ForegroundColor Yellow
+                if (-not (Invoke-Screen1SelectQuickCalibration -Pipeline $pipeline -Handle $target.Handle)) {
                     Hide-RelayStatus
                     return
                 }

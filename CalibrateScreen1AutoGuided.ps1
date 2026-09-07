@@ -1,6 +1,36 @@
 <#
 =====================================================================
- CalibrateScreen1AutoGuided.ps1
+ OBSOLETE - no longer needed.
+
+ Screen1Select's grid calibration now happens automatically, every
+ time you press the pipeline's hotkey (e.g. Ctrl+Shift+M): you'll get
+ a "hover the mouse 2 characters left of the topmost COB row, then
+ click OK" prompt right before the pipeline starts - see
+ Invoke-Screen1SelectQuickCalibration in
+ AutoClipCaptureSqlPipelineScreen1Select.ps1. This file (and
+ CalibrateScreen1AutoGuided.bat) can be deleted; they're kept here
+ only for reference and aren't called from anywhere anymore.
+
+ This also fixes a real bug this script had: the OriginX/OriginY it
+ saved were the pixel position of the first data row/click column
+ itself, but AutoClipCaptureSqlPipelineScreen1Select.ps1's click
+ formula (ClientX = OriginX + Col*CharWidthPx, ClientY = OriginY +
+ Row*CharHeightPx) expects OriginX/OriginY to be the row-0/column-0
+ point, then adds the row/column offset on top. Saving the first-data-
+ row point as Origin meant every click was that same offset (6 rows /
+ 2 columns, with this config's numbers) too far down and to the
+ right - which is what caused rows to seemingly get "skipped" (really:
+ clicked several rows below the intended one, sometimes landing on a
+ different real component, sometimes past the bottom of the visible
+ list) and the mouse cursor to visibly jump to an unexpected spot.
+ The new inline flow avoids this by back-solving the true row-0/col-0
+ origin instead of saving the first-data-row point directly.
+=====================================================================
+#>
+
+<#
+=====================================================================
+ CalibrateScreen1AutoGuided.ps1 (superseded - see notice above)
 
  The easiest way to fill in Pipelines[].Screen1Select's OriginX /
  OriginY / CharWidthPx / CharHeightPx.
