@@ -210,7 +210,7 @@ $originY = (($firstDataRow - 1) * $CharHeightPx) + ($CharHeightPx / 2)
 # ---- The one check you can actually judge by eye: does the pointer ----
 # ---- land next to the real, visible "COB" text? ----
 Confirm-Point -Handle $targetHandle -X ([ref]$originX) -Y ([ref]$originY) -AxisMode 'both' `
-    -Instruction "Look at the terminal. Is the pointer on the first data row, one column left of 'COB'? Nudge if not, then Enter."
+    -Instruction "Look at the terminal. Is the pointer on the first data row, $($cobColumn - $clickTargetColumn) column(s) left of 'COB'? Nudge if not, then Enter."
 
 $OriginX = [math]::Round($originX)
 $OriginY = [math]::Round($originY)

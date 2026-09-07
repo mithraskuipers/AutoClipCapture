@@ -92,7 +92,7 @@
                                                 "BackActionToken":  "{F3}",
                                                 "BackActionDisplay":  "F3",
                                                 "StepDelayMs":  900,
-                                                "RewindStepDelayMs":  300
+                                                "RewindStepDelayMs":  150
                                             },
                           "Component":  {
                                             "ZoomActionToken":  "{ENTER}",
