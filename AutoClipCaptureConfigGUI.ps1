@@ -756,6 +756,11 @@ $btnSave.Add_Click({
         F3Hotkey                 = [pscustomobject]@{ Modifiers = $script:F3Mods;     Key = $script:F3Key;     Display = $txtF3.Text;     RequireRightModifier = [bool]$chkF3Right.Checked }
         ResultOverlayDurationMs  = [int]$numOverlayDur.Value
         Modes                    = $modesForSave
+        # Pipelines aren't edited by this GUI (see the header comment
+        # in AutoClipCapture.ps1) - carry whatever was already in the
+        # file straight through so saving settings here can't silently
+        # delete them.
+        Pipelines                = if ($existing.PSObject.Properties.Name -contains 'Pipelines') { $existing.Pipelines } else { @() }
     }
 
     $newConfig | ConvertTo-Json -Depth 6 | Set-Content -Path $ConfigPath -Encoding UTF8

@@ -124,6 +124,26 @@
                        array) - like Modes, they aren't edited from the
                        config GUI.
 
+                       A Pipeline can also turn on an optional
+                       "ComponentList" pre-pass (Pipelines[].ComponentList.Enabled).
+                       When on, pressing the pipeline's hotkey (assumed
+                       to be pressed while already sitting on Screen 1,
+                       the component overview) first pages through the
+                       entire overview once, front to back - Ctrl+C,
+                       trim off ComponentList.SkipRowsStart/SkipRowsEnd
+                       rows (default 5/3), append what's left to
+                       pipeline_component_list.txt, press
+                       ComponentList.NextActionToken (F8 by default) to
+                       reach the next page, and repeat - without
+                       opening a single component. It stops
+                       automatically once a page comes back matching
+                       the one before it (ComponentList.DupDetectThreshold,
+                       same comparison the duplicate-capture protection
+                       below uses), which means paging further isn't
+                       revealing anything new. That saved list is then
+                       available for later use; this phase's job ends
+                       once the list is captured.
+
  Duplicate-capture protection: each capture is compared to the one
  immediately before it. If they come back 99.5% identical (default;
  configurable), that usually means the target app has stopped handing
@@ -158,12 +178,16 @@ $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 # Pipeline screen logic lives in its own file per screen, all kept in
 # this same folder (no subfolders): Screen 1 = components,
 # Screen 2 = environments, Screen 3 = the COBOL/SQL search screen.
-# Dot-sourcing just defines their functions into this script's scope -
-# no side effects until the pipeline tick handler below actually calls
-# into them.
+# ComponentList is an optional "Step 1" pre-pass that also lives on
+# Screen 1 (paging through the full component overview once, up
+# front, before any zooming happens) - kept in its own file since it's
+# a separate phase with its own state names. Dot-sourcing just defines
+# their functions into this script's scope - no side effects until the
+# pipeline tick handler below actually calls into them.
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen1.ps1")
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen2.ps1")
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen3.ps1")
+. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineComponentList.ps1")
 
 function Get-DefaultConfig {
     [pscustomobject]@{
@@ -330,6 +354,41 @@ function Add-PipelineLevelDefaults {
     return $Level
 }
 
+# Same idea as Add-PipelineLevelDefaults, but for the ComponentList
+# pre-pass block, which has its own set of fields (no ZoomActionToken/
+# UnavailableText - it never opens anything, just pages through
+# Screen 1). Enabled defaults to $false so a Pipeline entry from before
+# this feature existed (or one that simply never mentions
+# ComponentList) keeps starting straight at CompZoom_Action, unchanged.
+function Add-PipelineComponentListDefaults {
+    param($Pipeline)
+    if ($null -eq $Pipeline) { return }
+
+    $defaults = @{
+        Enabled            = $false
+        NextActionToken    = '{F8}'
+        NextActionDisplay  = 'F8'
+        SkipRowsStart      = 5
+        SkipRowsEnd        = 3
+        DupDetectThreshold = 0.995
+        MaxPages           = 500
+        OutputFileName     = 'pipeline_component_list.txt'
+    }
+
+    if (-not ($Pipeline.PSObject.Properties.Name -contains 'ComponentList') -or $null -eq $Pipeline.ComponentList) {
+        $Pipeline | Add-Member -NotePropertyName ComponentList -NotePropertyValue ([pscustomobject]$defaults) -Force
+        return
+    }
+
+    $cl = $Pipeline.ComponentList
+    foreach ($key in $defaults.Keys) {
+        if (-not ($cl.PSObject.Properties.Name -contains $key)) {
+            $cl | Add-Member -NotePropertyName $key -NotePropertyValue $defaults[$key] -Force
+        }
+    }
+    if ($cl.DupDetectThreshold -gt 1) { $cl.DupDetectThreshold = $cl.DupDetectThreshold / 100.0 }  # tolerate "99.5" as well as "0.995"
+}
+
 foreach ($p in $PipelineConfigs) {
     if (-not ($p.PSObject.Properties.Name -contains 'UseFocusedWindow')) {
         $p | Add-Member -NotePropertyName UseFocusedWindow -NotePropertyValue $false -Force
@@ -342,6 +401,7 @@ foreach ($p in $PipelineConfigs) {
     if ($null -ne $p.Sql -and -not ($p.Sql.PSObject.Properties.Name -contains 'MaxIterations')) {
         $p.Sql | Add-Member -NotePropertyName MaxIterations -NotePropertyValue 500 -Force
     }
+    Add-PipelineComponentListDefaults -Pipeline $p
 }
 
 $ToggleHotkeyId  = 1
@@ -1192,6 +1252,9 @@ function Stop-PipelineCapture {
     $global:CR_PipelineComponentLabel   = $null
     $global:CR_PipelineEnvironmentLabel = $null
     $global:CR_PipelineCurrentScreen    = 0
+    $global:CR_PipelineListPageIdx      = 0
+    $global:CR_PipelineListPrevFiltered = $null
+    $global:CR_PipelineListOutputPath   = $null
     $global:CR_TargetHandle          = [IntPtr]::Zero
     Hide-RelayStatus
 }
@@ -1237,7 +1300,11 @@ foreach ($hkId in $ModeHotkeyMap.Keys) {
 }
 foreach ($hkId in $PipelineHotkeyMap.Keys) {
     $p = $PipelineHotkeyMap[$hkId]
-    Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
+    if ($null -ne $p.ComponentList -and [bool]$p.ComponentList.Enabled) {
+        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component list pre-pass -> component -> environment -> SQL search)" -ForegroundColor White
+    } else {
+        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
+    }
 }
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
@@ -1285,6 +1352,11 @@ $global:CR_PipelineComponentLabel   = $null
 $global:CR_PipelineEnvironmentLabel = $null
 $global:CR_PipelineCurrentScreen    = 0   # 0 = unknown, else 1/2/3 - see Get-PipelineScreenNumber
 
+# ---- ComponentList pre-pass state (see AutoClipCaptureSqlPipelineComponentList.ps1) ----
+$global:CR_PipelineListPageIdx      = 0     # how many pages have been saved so far
+$global:CR_PipelineListPrevFiltered = $null # previous page's filtered text, for end-of-list comparison
+$global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_component_list.txt for this run
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
 
@@ -1305,6 +1377,7 @@ $tickAction = {
             $pipeline = $global:CR_ActivePipelineConfig
 
             switch -Wildcard ($global:CR_PipelineState) {
+                'List*' { Invoke-PipelineListTick }
                 'Comp*' { Invoke-PipelineScreen1Tick }
                 'Env*'  { Invoke-PipelineScreen2Tick }
                 'Sql_*' { Invoke-PipelineScreen3Tick }
@@ -1776,12 +1849,14 @@ $hotkeyAction = {
                 }
             }
 
+            $useComponentList = ($null -ne $pipeline.ComponentList) -and [bool]$pipeline.ComponentList.Enabled
+
             Hide-RelayResultOverlay
             $global:CR_TargetHandle             = $target.Handle
             $global:CR_TargetTitle              = $target.Title
             $global:CR_ActiveAutomation         = $pipeline.Id
             $global:CR_ActivePipelineConfig     = $pipeline
-            $global:CR_PipelineState            = 'CompZoom_Action'
+            $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompZoom_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
             $global:CR_PipelineEnvironmentIdx   = 0
@@ -1790,12 +1865,20 @@ $hotkeyAction = {
             $global:CR_PipelineComponentLabel   = $null
             $global:CR_PipelineEnvironmentLabel = $null
             $global:CR_PipelineCurrentScreen    = 0
+            $global:CR_PipelineListPageIdx      = 0
+            $global:CR_PipelineListPrevFiltered = $null
+            $global:CR_PipelineListOutputPath   = if ($useComponentList) { Join-Path $LogDir $pipeline.ComponentList.OutputFileName } else { $null }
 
             $timer.Stop()
             $timer.Start()
 
-            Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
-            Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting..." ([System.Drawing.Color]::Lime)
+            if ($useComponentList) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title) (component list pre-pass -> $($global:CR_PipelineListOutputPath))" -ForegroundColor Green
+                Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting component list..." ([System.Drawing.Color]::Lime)
+            } else {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
+                Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting..." ([System.Drawing.Color]::Lime)
+            }
         } finally {
             $global:CR_Selecting = $false
         }
