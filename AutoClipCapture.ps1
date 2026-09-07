@@ -188,6 +188,7 @@ $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen2.ps1")
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen3.ps1")
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineComponentList.ps1")
+. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen1Select.ps1")
 
 function Get-DefaultConfig {
     [pscustomobject]@{
@@ -481,6 +482,21 @@ public static class Win32
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
+
+    // ---- Mouse-click support (Screen1Select pipeline phase) ----
+    // ClientToScreen takes a point *relative to a window's client
+    // area* and turns it into absolute screen coordinates - which is
+    // exactly what SetCursorPos needs, and lets the caller reason
+    // purely in "column/row inside this window" terms without ever
+    // touching the window's actual on-screen position itself.
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref System.Drawing.Point lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 }
 
 public class HotkeyForm : Form
@@ -1255,6 +1271,10 @@ function Stop-PipelineCapture {
     $global:CR_PipelineListPageIdx      = 0
     $global:CR_PipelineListPrevFiltered = $null
     $global:CR_PipelineListOutputPath   = $null
+    $global:CR_PipelineRewindPrevText    = $null
+    $global:CR_PipelineRewindPresses     = 0
+    $global:CR_PipelineComponentList     = @()
+    $global:CR_PipelineSelectSearchPages = 0
     $global:CR_TargetHandle          = [IntPtr]::Zero
     Hide-RelayStatus
 }
@@ -1286,6 +1306,34 @@ function Set-RelayForeground {
     }
 
     Start-Sleep -Milliseconds 30
+    return $true
+}
+
+# Left-clicks at a CLIENT-relative point (i.e. relative to the target
+# window's own client area, not the desktop) inside the given window:
+# brings it to the foreground first (same as every other action this
+# tool sends), converts (ClientX, ClientY) to absolute screen
+# coordinates via ClientToScreen, moves the real cursor there, then
+# fires a left button down/up. Used by the Screen1Select pipeline
+# phase to click into a row's prefix/selection field before typing
+# into it - see AutoClipCaptureSqlPipelineScreen1Select.ps1 for how
+# (ClientX, ClientY) gets computed from a text row/column.
+function Invoke-RelayMouseClick {
+    param(
+        [IntPtr]$Handle,
+        [int]$ClientX,
+        [int]$ClientY
+    )
+    if (-not (Set-RelayForeground -Handle $Handle)) { return $false }
+
+    $pt = New-Object System.Drawing.Point($ClientX, $ClientY)
+    if (-not [Win32]::ClientToScreen($Handle, [ref]$pt)) { return $false }
+
+    [void][Win32]::SetCursorPos($pt.X, $pt.Y)
+    Start-Sleep -Milliseconds 30
+    [Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)   # MOUSEEVENTF_LEFTDOWN
+    Start-Sleep -Milliseconds 30
+    [Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)   # MOUSEEVENTF_LEFTUP
     return $true
 }
 
@@ -1357,6 +1405,12 @@ $global:CR_PipelineListPageIdx      = 0     # how many pages have been saved so 
 $global:CR_PipelineListPrevFiltered = $null # previous page's filtered text, for end-of-list comparison
 $global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_component_list.txt for this run
 
+# ---- Rewind + Select state (see AutoClipCaptureSqlPipelineScreen1Select.ps1) ----
+$global:CR_PipelineRewindPrevText    = $null # previous page's raw text while pressing F7, for "stopped changing = at the top" detection
+$global:CR_PipelineRewindPresses     = 0     # safety counter so a page that never stops changing can't loop forever
+$global:CR_PipelineComponentList     = @()   # component ids parsed out of the saved list file, in file order
+$global:CR_PipelineSelectSearchPages = 0     # how many times F8 has been pressed hunting for the *current* id
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
 
@@ -1378,6 +1432,8 @@ $tickAction = {
 
             switch -Wildcard ($global:CR_PipelineState) {
                 'List*' { Invoke-PipelineListTick }
+                'Rewind*' { Invoke-PipelineScreen1SelectTick }
+                'Select*' { Invoke-PipelineScreen1SelectTick }
                 'Comp*' { Invoke-PipelineScreen1Tick }
                 'Env*'  { Invoke-PipelineScreen2Tick }
                 'Sql_*' { Invoke-PipelineScreen3Tick }
@@ -1871,6 +1927,22 @@ $hotkeyAction = {
                 $listOutputPath = Join-Path $LogDir $safeListName
             }
 
+            # Fail fast rather than run the whole component-list pass
+            # and rewind only to click nonsense: Screen1Select's grid
+            # calibration (OriginX/OriginY/CharWidthPx/CharHeightPx)
+            # can't be derived automatically - see the header comment
+            # in AutoClipCaptureSqlPipelineScreen1Select.ps1 and
+            # CalibrateScreen1ClickPosition.ps1 for how to measure it.
+            $selCfg = $pipeline.Screen1Select
+            if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
+                if ([double]$selCfg.CharWidthPx -le 0 -or [double]$selCfg.CharHeightPx -le 0) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled - Screen1Select isn't calibrated yet (CharWidthPx/CharHeightPx are 0)." -ForegroundColor Red
+                    Write-Host "  Run CalibrateScreen1ClickPosition.ps1 to measure OriginX/OriginY/CharWidthPx/CharHeightPx, then fill them into this pipeline's Screen1Select block in $ConfigPath." -ForegroundColor Yellow
+                    Hide-RelayStatus
+                    return
+                }
+            }
+
             Hide-RelayResultOverlay
             $global:CR_TargetHandle             = $target.Handle
             $global:CR_TargetTitle              = $target.Title
@@ -1888,6 +1960,10 @@ $hotkeyAction = {
             $global:CR_PipelineListPageIdx      = 0
             $global:CR_PipelineListPrevFiltered = $null
             $global:CR_PipelineListOutputPath   = $listOutputPath
+            $global:CR_PipelineRewindPrevText   = $null
+            $global:CR_PipelineRewindPresses    = 0
+            $global:CR_PipelineComponentList    = @()
+            $global:CR_PipelineSelectSearchPages = 0
 
             $timer.Stop()
             $timer.Start()

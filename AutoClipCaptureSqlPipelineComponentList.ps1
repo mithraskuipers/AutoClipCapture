@@ -26,14 +26,17 @@
           -> different from the previous page -> append it to the
              output file -> ListNext_Action -> ListNext_Wait
              -> ListCapture_Wait (next page)
-          -> same as the previous page -> end of the list reached;
-             stop here. (Step 2, which will make use of the saved
-             list, is a separate feature to be added later - this
-             phase's job ends at "list captured".)
+          -> same as the previous page -> end of the list reached.
           -> page contains ComponentList.BottomOfListText (default
              "Bottom of List") -> end of list reached; save this page
-             (it's genuinely the last one, not a repeat) and stop here
-             immediately - no F8 page-turn, no similarity check needed.
+             (it's genuinely the last one, not a repeat) - no F8
+             page-turn, no similarity check needed.
+        Either way, "end of the list" hands off to
+        Complete-PipelineListCapture: if this pipeline's
+        Screen1Select.Enabled is true, that's a rewind-to-top followed
+        by a list-driven row search (see
+        AutoClipCaptureSqlPipelineScreen1Select.ps1); otherwise the
+        pipeline just stops here, list saved.
 
  Each page is filtered with its own row-skip settings
  (ComponentList.SkipRowsStart / SkipRowsEnd - default 5/3), independent
@@ -65,6 +68,28 @@
 function Invoke-PipelineListTick {
     $pipeline = $global:CR_ActivePipelineConfig
     $listCfg  = $pipeline.ComponentList
+
+    # ---- Shared "list capture is done" exit point, used by both the
+    # BottomOfListText branch and the duplicate-page branch below. When
+    # this pipeline's Screen1Select phase is enabled, hands off to it
+    # (rewind to top, then hunt down each id from the list) instead of
+    # stopping outright - see AutoClipCaptureSqlPipelineScreen1Select.ps1. ----
+    function Complete-PipelineListCapture {
+        param([string]$Reason)
+
+        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list: $Reason - end of list reached." -ForegroundColor Cyan
+        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list complete - $($global:CR_PipelineListPageIdx) page(s) saved to $($global:CR_PipelineListOutputPath)" -ForegroundColor Green
+
+        $selCfg = $pipeline.Screen1Select
+        if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
+            Show-RelayResultOverlay -Text "LIST DONE - REWINDING" -Color ([System.Drawing.Color]::DeepSkyBlue)
+            $global:CR_PipelineState = 'Rewind_Start'
+            $global:CR_ElapsedMs = 0
+        } else {
+            Show-RelayResultOverlay -Text "COMPONENT LIST COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
+            Stop-PipelineCapture
+        }
+    }
 
     switch ($global:CR_PipelineState) {
 
@@ -131,10 +156,7 @@ function Invoke-PipelineListTick {
                     }
                 }
                 $global:CR_PipelineListPageIdx++
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list: page $($global:CR_PipelineListPageIdx) contains '$($listCfg.BottomOfListText)' - end of list reached." -ForegroundColor Cyan
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list complete - $($global:CR_PipelineListPageIdx) page(s) saved to $($global:CR_PipelineListOutputPath)" -ForegroundColor Green
-                Show-RelayResultOverlay -Text "COMPONENT LIST COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
-                Stop-PipelineCapture
+                Complete-PipelineListCapture -Reason "page $($global:CR_PipelineListPageIdx) contains '$($listCfg.BottomOfListText)'"
                 return
             }
 
@@ -148,10 +170,7 @@ function Invoke-PipelineListTick {
                 # F8 didn't reveal anything new - this page is a repeat
                 # of the previous one, so it was already saved. Don't
                 # append it again; the list is complete.
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list: page $($global:CR_PipelineListPageIdx + 1) matches the previous page - end of list reached." -ForegroundColor Cyan
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list complete - $($global:CR_PipelineListPageIdx) page(s) saved to $($global:CR_PipelineListOutputPath)" -ForegroundColor Green
-                Show-RelayResultOverlay -Text "COMPONENT LIST COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
-                Stop-PipelineCapture
+                Complete-PipelineListCapture -Reason "page $($global:CR_PipelineListPageIdx + 1) matches the previous page"
                 return
             }
 

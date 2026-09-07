@@ -73,6 +73,26 @@
                                                 "MaxPages":  500,
                                                 "OutputFileName":  "pipeline_component_list.txt"
                                             },
+                          "Screen1Select":  {
+                                                "Enabled":  true,
+                                                "RowPrefixText":  "COB",
+                                                "ActionKeyChar":  "B",
+                                                "ActionKeyEnterToken":  "{ENTER}",
+                                                "ClickColumnOffset":  -1,
+                                                "OriginX":  0,
+                                                "OriginY":  0,
+                                                "CharWidthPx":  0,
+                                                "CharHeightPx":  0,
+                                                "RewindActionToken":  "{F7}",
+                                                "RewindActionDisplay":  "F7",
+                                                "MaxRewindPresses":  200,
+                                                "NextActionToken":  "{F8}",
+                                                "NextActionDisplay":  "F8",
+                                                "MaxSearchPagesPerItem":  500,
+                                                "BackActionToken":  "{F3}",
+                                                "BackActionDisplay":  "F3",
+                                                "StepDelayMs":  900
+                                            },
                           "Component":  {
                                             "ZoomActionToken":  "{ENTER}",
                                             "ZoomActionDisplay":  "Enter",
