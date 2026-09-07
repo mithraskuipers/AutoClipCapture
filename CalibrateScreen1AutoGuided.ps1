@@ -156,10 +156,14 @@ if ($targets.Count -gt 1) {
     $pIdx = Read-Host "Enter the number"
     $chosenPipeline = $targets[[int]$pIdx]
 }
-$clickColumnOffset = 0
-if ($null -ne $chosenPipeline.Screen1Select.ClickColumnOffset) {
-    $clickColumnOffset = [double]$chosenPipeline.Screen1Select.ClickColumnOffset
-}
+
+# Fixed for this setup: "COB" always starts at column 5, and the
+# selection field where the action letter (e.g. "B") gets typed is
+# always columns 2-3. We click the left edge of that field (column 2).
+$cobColumn = 5
+$clickTargetColumn = 2
+$clickColumnOffset = $clickTargetColumn - $cobColumn   # -3
+$chosenPipeline.Screen1Select.ClickColumnOffset = $clickColumnOffset
 
 # ---- Pick the target window from a list (no clicking required) ----
 Write-Host "`nMake sure your terminal window is open and positioned where it'll stay." -ForegroundColor Cyan
@@ -190,8 +194,7 @@ if ($clientW -le 0 -or $clientH -le 0) {
 Write-Host "`nA few quick questions - just press Enter to accept the suggested default if unsure." -ForegroundColor Cyan
 $cols = 80
 $rows = 32
-Write-Host "Terminal display is fixed at $cols columns x $rows rows."
-$cobColumn = Read-NumberOrDefault "Which column number does 'COB' start on (counting from 1, left edge)?" 1
+Write-Host "Terminal display is fixed at $cols columns x $rows rows. 'COB' fixed at column $cobColumn, click target fixed at column $clickTargetColumn."
 $firstDataRow = Read-NumberOrDefault "Which row number is the very first data row on (counting from 1, top of screen)?" 4
 $rowsDown = Read-NumberOrDefault "For the height check, how many rows below the first row should we sample?" 10
 
