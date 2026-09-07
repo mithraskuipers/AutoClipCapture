@@ -188,8 +188,9 @@ if ($clientW -le 0 -or $clientH -le 0) {
 
 # ---- A few simple number questions ----
 Write-Host "`nA few quick questions - just press Enter to accept the suggested default if unsure." -ForegroundColor Cyan
-$cols = Read-NumberOrDefault "How many columns wide is the terminal display?" 80
-$rows = Read-NumberOrDefault "How many rows tall is the terminal display?" 24
+$cols = 80
+$rows = 32
+Write-Host "Terminal display is fixed at $cols columns x $rows rows."
 $cobColumn = Read-NumberOrDefault "Which column number does 'COB' start on (counting from 1, left edge)?" 1
 $firstDataRow = Read-NumberOrDefault "Which row number is the very first data row on (counting from 1, top of screen)?" 4
 $rowsDown = Read-NumberOrDefault "For the height check, how many rows below the first row should we sample?" 10
