@@ -190,13 +190,12 @@ if ($clientW -le 0 -or $clientH -le 0) {
     exit 1
 }
 
-# ---- A few simple number questions ----
-Write-Host "`nA few quick questions - just press Enter to accept the suggested default if unsure." -ForegroundColor Cyan
+# ---- No questions left - everything is fixed ----
 $cols = 80
 $rows = 32
-Write-Host "Terminal display is fixed at $cols columns x $rows rows. 'COB' fixed at column $cobColumn, click target fixed at column $clickTargetColumn."
-$firstDataRow = Read-NumberOrDefault "Which row number is the very first data row on (counting from 1, top of screen)?" 4
-$rowsDown = Read-NumberOrDefault "For the height check, how many rows below the first row should we sample?" 10
+$firstDataRow = 7   # first 6 rows are skipped as header, so the first data row is row 7
+$rowsDown = 10      # how far down we sample to work out character height
+Write-Host "`nTerminal display fixed at $cols columns x $rows rows. 'COB' at column $cobColumn, click target at column $clickTargetColumn, first data row $firstDataRow." -ForegroundColor Cyan
 
 $charWidthGuess = $clientW / $cols
 $charHeightGuess = $clientH / $rows
