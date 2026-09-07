@@ -445,8 +445,6 @@ using System.Text;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 
-public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-
 public static class Win32
 {
     [DllImport("user32.dll")]
@@ -493,16 +491,6 @@ public static class Win32
     // touching the window's actual on-screen position itself.
     [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr hWnd, ref System.Drawing.Point lpPoint);
-
-    // ScreenToClient/GetClientRect - used by the Screen1Select "quick
-    // position check" (Invoke-Screen1SelectQuickCalibration) to turn
-    // the user's current mouse position into a client-relative point
-    // and to measure the target window's client pixel size.
-    [DllImport("user32.dll")]
-    public static extern bool ScreenToClient(IntPtr hWnd, ref System.Drawing.Point lpPoint);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int X, int Y);
@@ -1939,16 +1927,21 @@ $hotkeyAction = {
                 $listOutputPath = Join-Path $LogDir $safeListName
             }
 
-            # Screen1Select's click grid (OriginX/OriginY/CharWidthPx/
-            # CharHeightPx) depends on exactly where/how big the
-            # terminal window is right now, so it's measured fresh
-            # every time via a quick "hover here, click OK" check
-            # instead of a separate one-time calibration script/session
-            # - see Invoke-Screen1SelectQuickCalibration in
-            # AutoClipCaptureSqlPipelineScreen1Select.ps1.
+            # Screen1Select needs the mouse positioned correctly before
+            # it starts clicking rows - just a reminder here, nothing
+            # interactive/blocking. Calibrate the click grid once via
+            # CalibrateScreen1AutoGuided.bat if OriginX/OriginY/
+            # CharWidthPx/CharHeightPx aren't set yet.
             $selCfg = $pipeline.Screen1Select
             if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-                if (-not (Invoke-Screen1SelectQuickCalibration -Pipeline $pipeline -Handle $target.Handle)) {
+                $offset = [int]$selCfg.ClickColumnOffset
+                $sideCount = [Math]::Abs($offset)
+                $side = if ($offset -lt 0) { "left" } else { "right" }
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Reminder: position the mouse cursor $sideCount character(s) to the $side of the topmost visible '$($selCfg.RowPrefixText)' row before this pipeline reaches Screen1Select." -ForegroundColor Cyan
+
+                if ([double]$selCfg.CharWidthPx -le 0 -or [double]$selCfg.CharHeightPx -le 0) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled - Screen1Select isn't calibrated yet (CharWidthPx/CharHeightPx are 0)." -ForegroundColor Red
+                    Write-Host "  Run CalibrateScreen1AutoGuided.bat once to measure OriginX/OriginY/CharWidthPx/CharHeightPx." -ForegroundColor Yellow
                     Hide-RelayStatus
                     return
                 }
