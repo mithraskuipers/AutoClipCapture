@@ -74,6 +74,8 @@ function Invoke-PipelineScreen3Tick {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
                 }
 
+                Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name | Out-Null
+
                 $global:CR_PipelineSqlIterations++
 
                 $foundMatch    = Test-RelayTextContains -Text $text -Needle $sql.FoundText

@@ -880,6 +880,61 @@ function Get-PipelineItemLabel {
     return $FallbackLabel
 }
 
+# ---- Screen tracking ----
+#
+# Each of the 3 pipeline screens has its own fingerprint in the
+# captured text, independent of which state the pipeline *thinks*
+# it's in:
+#   Screen 1 (overview)    -> "REPOSITORY LIST" near the top
+#   Screen 2 (environment) -> "COMPONENT VERSION" near the top
+#   Screen 3 (COBOL code)  -> neither of the above, but has both
+#                             "BROWSE" and "Menu" on the first page
+# Returns 1, 2, 3, or 0 for text that matches none of them - a popup,
+# an error, a logout screen, or anything else unrecognized.
+function Get-PipelineScreenNumber {
+    param([string]$Text)
+
+    if (Test-RelayTextContains -Text $Text -Needle 'REPOSITORY LIST')   { return 1 }
+    if (Test-RelayTextContains -Text $Text -Needle 'COMPONENT VERSION') { return 2 }
+    if ((Test-RelayTextContains -Text $Text -Needle 'BROWSE') -and (Test-RelayTextContains -Text $Text -Needle 'Menu')) {
+        return 3
+    }
+    return 0
+}
+
+# Detects the screen from freshly-captured text, compares it against
+# $global:CR_PipelineCurrentScreen (what we were on a moment ago),
+# logs whether we progressed, went back, stayed put, or landed
+# somewhere unrecognized, then updates the tracked value and returns
+# the detected screen number. Called at every clipboard capture point
+# across all 3 screen files, so the console always shows the real,
+# independently-verified screen - not just what the state machine
+# assumed would happen.
+function Update-PipelineScreenTracking {
+    param(
+        [string]$Text,
+        [string]$PipelineName
+    )
+
+    $detected = Get-PipelineScreenNumber -Text $Text
+    $previous = $global:CR_PipelineCurrentScreen
+
+    if ($detected -eq 0) {
+        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: unrecognized screen (was screen $previous)." -ForegroundColor Yellow
+    } elseif ($previous -eq 0) {
+        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: now on screen $detected." -ForegroundColor DarkCyan
+    } elseif ($detected -eq $previous) {
+        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: stayed on screen $detected." -ForegroundColor DarkCyan
+    } elseif ($detected -gt $previous) {
+        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: progressed from screen $previous to screen $detected." -ForegroundColor DarkCyan
+    } else {
+        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: went back from screen $previous to screen $detected." -ForegroundColor DarkCyan
+    }
+
+    $global:CR_PipelineCurrentScreen = $detected
+    return $detected
+}
+
 # Records one component's SQL-found result into a growing Markdown
 # table at component_sql_check.md (same folder as the configured log
 # file). If the component already has a row, that row is updated in
@@ -1136,6 +1191,7 @@ function Stop-PipelineCapture {
     $global:CR_PipelineAfterBack     = $null
     $global:CR_PipelineComponentLabel   = $null
     $global:CR_PipelineEnvironmentLabel = $null
+    $global:CR_PipelineCurrentScreen    = 0
     $global:CR_TargetHandle          = [IntPtr]::Zero
     Hide-RelayStatus
 }
@@ -1227,6 +1283,7 @@ $global:CR_PipelineSqlIterations    = 0
 $global:CR_PipelineAfterBack        = $null   # state to resume at once the single F3 "back" completes
 $global:CR_PipelineComponentLabel   = $null
 $global:CR_PipelineEnvironmentLabel = $null
+$global:CR_PipelineCurrentScreen    = 0   # 0 = unknown, else 1/2/3 - see Get-PipelineScreenNumber
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -1253,11 +1310,17 @@ $tickAction = {
                 'Sql_*' { Invoke-PipelineScreen3Tick }
 
                 # ---- Single F3 press back to the previous screen, then
-                # resume wherever the caller queued up via AfterBack.
-                # Always exactly one press - never held/repeated - so a
-                # screen that treats repeated F3 as "back multiple
-                # screens" (e.g. all the way out to a logout screen)
-                # stays safe regardless of which level triggered it. ----
+                # verify we actually landed where expected before
+                # resuming wherever the caller queued up via AfterBack.
+                # Always exactly one F3 press - never held/repeated -
+                # but that alone doesn't guarantee some screens won't
+                # still jump back further than intended (e.g. all the
+                # way out to a logout screen), so Back_Copy checks the
+                # landing screen against what AfterBack implies before
+                # continuing: CompNext_Action means "should be back on
+                # screen 1", EnvNext_Action means "should be back on
+                # screen 2". A mismatch stops the pipeline rather than
+                # risk compounding it by pressing on regardless. ----
                 'Back_Action' {
                     if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
@@ -1272,6 +1335,38 @@ $tickAction = {
                 'Back_Wait' {
                     $global:CR_ElapsedMs += $TimerTickMs
                     if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                        if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                            Stop-PipelineCapture
+                            return
+                        }
+                        [System.Windows.Forms.SendKeys]::SendWait('^c')
+                        $global:CR_PipelineState = 'Back_Copy'
+                        $global:CR_ElapsedMs = 0
+                    }
+                }
+                'Back_Copy' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                        $text = ''
+                        try {
+                            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                                $text = [System.Windows.Forms.Clipboard]::GetText()
+                            }
+                        } catch {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                        }
+
+                        $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+                        $expected = if ($global:CR_PipelineAfterBack -eq 'CompNext_Action') { 1 } else { 2 }
+
+                        if ($detected -ne $expected) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Landed on screen $detected after going back, expected screen $expected - stopping to be safe." -ForegroundColor Red
+                            Show-RelayResultOverlay -Text "UNEXPECTED SCREEN - STOPPED" -Color ([System.Drawing.Color]::Red)
+                            Stop-PipelineCapture
+                            return
+                        }
+
                         $global:CR_PipelineState     = $global:CR_PipelineAfterBack
                         $global:CR_PipelineAfterBack = $null
                         $global:CR_ElapsedMs         = 0
@@ -1694,6 +1789,7 @@ $hotkeyAction = {
             $global:CR_PipelineAfterBack        = $null
             $global:CR_PipelineComponentLabel   = $null
             $global:CR_PipelineEnvironmentLabel = $null
+            $global:CR_PipelineCurrentScreen    = 0
 
             $timer.Stop()
             $timer.Start()

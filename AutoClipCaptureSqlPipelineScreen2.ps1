@@ -68,15 +68,31 @@ function Invoke-PipelineScreen2Tick {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
                 }
 
-                if (Test-RelayTextContains -Text $text -Needle $envLevel.UnavailableText) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Environment $($global:CR_PipelineEnvironmentIdx + 1) unavailable - skipping." -ForegroundColor Yellow
-                    $global:CR_PipelineState = 'EnvNext_Action'
-                    $global:CR_ElapsedMs = 0
-                } else {
+                $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+
+                if ($detected -eq 3) {
+                    # Landed on screen 3 - the zoom worked.
                     $global:CR_PipelineEnvironmentLabel = Get-PipelineItemLabel -Text $text -Pattern $envLevel.LabelPattern -FallbackLabel "Environment $($global:CR_PipelineEnvironmentIdx + 1)"
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Environment '$($global:CR_PipelineEnvironmentLabel)' available - running SQL search." -ForegroundColor Green
                     $global:CR_PipelineSqlIterations = 0
                     $global:CR_PipelineState = 'Sql_Action'
+                    $global:CR_ElapsedMs = 0
+                } elseif ($detected -eq 2) {
+                    # Still on screen 2 - this environment didn't open.
+                    # UnavailableText just explains why in the log.
+                    if (Test-RelayTextContains -Text $text -Needle $envLevel.UnavailableText) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Environment $($global:CR_PipelineEnvironmentIdx + 1) unavailable - skipping." -ForegroundColor Yellow
+                    } else {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Environment $($global:CR_PipelineEnvironmentIdx + 1) didn't open (stayed on screen 2, '$($envLevel.UnavailableText)' not seen) - skipping." -ForegroundColor Yellow
+                    }
+                    $global:CR_PipelineState = 'EnvNext_Action'
+                    $global:CR_ElapsedMs = 0
+                } else {
+                    # Neither screen 2 nor screen 3 - an unrecognized
+                    # screen (popup, error, ...). Play it safe and skip
+                    # this environment rather than get stuck on it.
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unexpected screen (detected: $detected) after trying environment $($global:CR_PipelineEnvironmentIdx + 1) - skipping." -ForegroundColor Yellow
+                    $global:CR_PipelineState = 'EnvNext_Action'
                     $global:CR_ElapsedMs = 0
                 }
             }

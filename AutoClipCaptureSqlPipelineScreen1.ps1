@@ -63,15 +63,31 @@ function Invoke-PipelineScreen1Tick {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
                 }
 
-                if (Test-RelayTextContains -Text $text -Needle $comp.UnavailableText) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component $($global:CR_PipelineComponentIdx + 1) unavailable - skipping." -ForegroundColor Yellow
-                    $global:CR_PipelineState = 'CompNext_Action'
-                    $global:CR_ElapsedMs = 0
-                } else {
+                $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+
+                if ($detected -eq 2) {
+                    # Landed on screen 2 - the zoom worked.
                     $global:CR_PipelineComponentLabel = Get-PipelineItemLabel -Text $text -Pattern $comp.LabelPattern -FallbackLabel "Component $($global:CR_PipelineComponentIdx + 1)"
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component '$($global:CR_PipelineComponentLabel)' available - entering environments." -ForegroundColor Green
                     $global:CR_PipelineEnvironmentIdx = 0
                     $global:CR_PipelineState = 'EnvZoom_Action'
+                    $global:CR_ElapsedMs = 0
+                } elseif ($detected -eq 1) {
+                    # Still on screen 1 - this component didn't open.
+                    # UnavailableText just explains why in the log.
+                    if (Test-RelayTextContains -Text $text -Needle $comp.UnavailableText) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component $($global:CR_PipelineComponentIdx + 1) unavailable - skipping." -ForegroundColor Yellow
+                    } else {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component $($global:CR_PipelineComponentIdx + 1) didn't open (stayed on screen 1, '$($comp.UnavailableText)' not seen) - skipping." -ForegroundColor Yellow
+                    }
+                    $global:CR_PipelineState = 'CompNext_Action'
+                    $global:CR_ElapsedMs = 0
+                } else {
+                    # Neither screen 1 nor screen 2 - an unrecognized
+                    # screen (popup, error, ...). Play it safe and skip
+                    # this component rather than get stuck on it.
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unexpected screen (detected: $detected) after trying component $($global:CR_PipelineComponentIdx + 1) - skipping." -ForegroundColor Yellow
+                    $global:CR_PipelineState = 'CompNext_Action'
                     $global:CR_ElapsedMs = 0
                 }
             }
