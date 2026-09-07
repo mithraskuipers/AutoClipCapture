@@ -91,7 +91,8 @@
                                                 "MaxSearchPagesPerItem":  500,
                                                 "BackActionToken":  "{F3}",
                                                 "BackActionDisplay":  "F3",
-                                                "StepDelayMs":  900
+                                                "StepDelayMs":  900,
+                                                "RewindStepDelayMs":  300
                                             },
                           "Component":  {
                                             "ZoomActionToken":  "{ENTER}",

@@ -63,10 +63,17 @@
      -> once every id from the list has been tried -> "PIPELINE
         COMPLETE" and stop.
 
- Every action in this phase runs at Screen1Select.StepDelayMs (default
- 900ms) rather than the pipeline's usual fast AfterActionKeyDelayMs/
- CopyDelayMs, specifically so it can be watched end to end while it's
- still being verified - turn it down once it's known to work reliably.
+ Row-selection actions (the Select_* states) run at
+ Screen1Select.StepDelayMs (default 900ms) rather than the pipeline's
+ usual fast AfterActionKeyDelayMs/CopyDelayMs, specifically so they can
+ be watched end to end while still being verified - turn it down once
+ it's known to work reliably.
+
+ The rewind-to-top phase (the Rewind_* states, pressing F7 until the
+ page stops changing) doesn't need that same caution - it's just
+ "press F7, copy, compare" in a loop - so it runs at the separate,
+ faster Screen1Select.RewindStepDelayMs (default 300ms) instead. Falls
+ back to StepDelayMs if RewindStepDelayMs isn't set in the config.
 
  ---- Mouse-click calibration ----
  Every click is computed as a plain grid formula, in CLIENT-relative
@@ -205,6 +212,11 @@ function Invoke-PipelineScreen1SelectTick {
     $selCfg   = $pipeline.Screen1Select
     $comp     = $pipeline.Component
     $delay    = [int]$selCfg.StepDelayMs
+    # Rewind (pressing F7 back to the top of screen 1) doesn't need the
+    # cautious, watch-it-happen pace the row-selection steps still use -
+    # it's just "press F7, copy, compare" in a loop, so it can run much
+    # faster. Falls back to StepDelayMs if RewindStepDelayMs isn't set.
+    $rewindDelay = if ($null -ne $selCfg.RewindStepDelayMs) { [int]$selCfg.RewindStepDelayMs } else { $delay }
 
     switch ($global:CR_PipelineState) {
 
@@ -223,7 +235,7 @@ function Invoke-PipelineScreen1SelectTick {
         }
         'Rewind_BaselineWait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -lt $delay) { return }
+            if ($global:CR_ElapsedMs -lt $rewindDelay) { return }
 
             $text = ''
             try {
@@ -250,7 +262,7 @@ function Invoke-PipelineScreen1SelectTick {
         }
         'Rewind_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -lt $delay) { return }
+            if ($global:CR_ElapsedMs -lt $rewindDelay) { return }
 
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
@@ -263,7 +275,7 @@ function Invoke-PipelineScreen1SelectTick {
         }
         'Rewind_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -lt $delay) { return }
+            if ($global:CR_ElapsedMs -lt $rewindDelay) { return }
 
             $text = ''
             try {
