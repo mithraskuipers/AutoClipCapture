@@ -30,17 +30,27 @@
              stop here. (Step 2, which will make use of the saved
              list, is a separate feature to be added later - this
              phase's job ends at "list captured".)
+          -> page contains ComponentList.BottomOfListText (default
+             "Bottom of List") -> end of list reached; save this page
+             (it's genuinely the last one, not a repeat) and stop here
+             immediately - no F8 page-turn, no similarity check needed.
 
  Each page is filtered with its own row-skip settings
  (ComponentList.SkipRowsStart / SkipRowsEnd - default 5/3), independent
  of the top-level SkipRowsStart/SkipRowsEnd used by the classic Toggle
  relay, since a given screen's header/footer padding doesn't have to
- match the pipeline's. "End of list" uses the same
- Get-TextSimilarity comparison the classic Toggle relay uses to detect
- a stuck capture (ComponentList.DupDetectThreshold - default 0.995),
- except here it stops automatically instead of asking, since running
- off the end of a bounded list is the expected, successful outcome
- rather than something to prompt about.
+ match the pipeline's. "End of list" is detected two ways: (1) an
+ explicit ComponentList.BottomOfListText marker (checked against the
+ raw, unfiltered clipboard text, since that marker typically lives in
+ the footer rows that get trimmed) - the fast path, since it's known
+ the instant the last page appears; or (2), as a fallback for lists
+ that don't print such a marker, the same Get-TextSimilarity
+ comparison the classic Toggle relay uses to detect a stuck capture
+ (ComponentList.DupDetectThreshold - default 0.995) - which only finds
+ out one page late, since it needs the repeated page to notice nothing
+ changed. Either way it stops automatically instead of asking, since
+ running off the end of a bounded list is the expected, successful
+ outcome rather than something to prompt about.
 
  Relies on shared state/helpers defined in AutoClipCapture.ps1
  ($global:CR_* pipeline state, $TimerTickMs / $CopyDelayMs /
@@ -104,6 +114,29 @@ function Invoke-PipelineListTick {
             }
 
             $filtered = Get-FilteredCaptureText -Text $text -SkipStart ([int]$listCfg.SkipRowsStart) -SkipEnd ([int]$listCfg.SkipRowsEnd)
+
+            # ---- Explicit "Bottom of List" marker: checked against the
+            # raw (unfiltered) text, since it typically lives in the
+            # footer rows SkipRowsEnd trims off. Unlike duplicate
+            # detection, this page IS genuinely the last one - not a
+            # repeat of the one before it - so it still needs saving.
+            # Once saved, there's nothing left to page through: skip
+            # the similarity check and don't press F8 again. ----
+            if (Test-RelayTextContains -Text $text -Needle $listCfg.BottomOfListText) {
+                if (-not [string]::IsNullOrEmpty($filtered)) {
+                    try {
+                        Add-Content -Path $global:CR_PipelineListOutputPath -Value $filtered -Encoding UTF8
+                    } catch {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Failed to write to $($global:CR_PipelineListOutputPath): $_" -ForegroundColor Red
+                    }
+                }
+                $global:CR_PipelineListPageIdx++
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list: page $($global:CR_PipelineListPageIdx) contains '$($listCfg.BottomOfListText)' - end of list reached." -ForegroundColor Cyan
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list complete - $($global:CR_PipelineListPageIdx) page(s) saved to $($global:CR_PipelineListOutputPath)" -ForegroundColor Green
+                Show-RelayResultOverlay -Text "COMPONENT LIST COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
+                Stop-PipelineCapture
+                return
+            }
 
             $isDuplicate = $false
             if ($null -ne $global:CR_PipelineListPrevFiltered) {
