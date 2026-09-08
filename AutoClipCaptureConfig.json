@@ -27,6 +27,12 @@
                      "Display":  "Alt+<",
                      "RequireRightModifier":  false
                  },
+    "ProbeHotkey":  {
+                     "Modifiers":  6,
+                     "Key":  73,
+                     "Display":  "Ctrl+Shift+I",
+                     "RequireRightModifier":  false
+                 },
     "ResultOverlayDurationMs":  4000,
     "Modes":  [
                   {
