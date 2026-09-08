@@ -507,23 +507,15 @@ public static class Win32
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 
-    // ---- Live click-origin capture (Screen1Select pipeline phase) ----
-    // Replaces the old guided pixel calibration: instead of measuring
-    // OriginX/OriginY/CharWidthPx/CharHeightPx ahead of time, the
-    // pipeline reads the REAL mouse cursor position at the moment its
-    // hotkey is pressed (the user having just clicked 2 characters
-    // left of the topmost row, per the startup reminder) and uses
-    // that single point plus the window's own client height to work
-    // out every other row's click point on the fly. See
-    // Get-RelayClientMousePos / Get-RelayClientHeight below and
-    // Get-PipelinePageClickPoint in
+    // ---- Fixed-grid geometry support (Screen1Select pipeline phase) ----
+    // The target screen is a fixed-size character grid (rows x cols
+    // configured in Screen1Select.GridRows/GridCols - 32x80 for a
+    // classic 3270 model 2 screen). GetClientRect gives the window's
+    // current client pixel size, which - divided by the known
+    // row/column count - turns any (row, col) grid position into a
+    // pixel point with no manual calibration at all. See
+    // Get-RelayClientSize below and Get-PipelinePageClickPoint in
     // AutoClipCaptureSqlPipelineScreen1Select.ps1.
-    [DllImport("user32.dll")]
-    public static extern bool GetCursorPos(out System.Drawing.Point lpPoint);
-
-    [DllImport("user32.dll")]
-    public static extern bool ScreenToClient(IntPtr hWnd, ref System.Drawing.Point lpPoint);
-
     [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 }
@@ -1366,36 +1358,22 @@ function Invoke-RelayMouseClick {
     return $true
 }
 
-# Returns the CURRENT mouse cursor position translated into CLIENT-
-# relative coordinates for the given window, or $null if that fails
-# (window gone, or the conversion fails). This is how Screen1Select
-# now gets its click origin - the user clicks 2 character(s) left of
-# the topmost visible row (see the startup reminder) and then presses
-# the pipeline's hotkey, which calls this immediately while the mouse
-# is still sitting where they clicked. No calibration file, no guided
-# tool - just whatever the cursor is doing right now.
-function Get-RelayClientMousePos {
-    param([IntPtr]$Handle)
-    if ($Handle -eq [IntPtr]::Zero -or -not [Win32]::IsWindow($Handle)) { return $null }
-    $pt = New-Object System.Drawing.Point(0, 0)
-    if (-not [Win32]::GetCursorPos([ref]$pt)) { return $null }
-    if (-not [Win32]::ScreenToClient($Handle, [ref]$pt)) { return $null }
-    return $pt
-}
-
-# Returns the target window's client-area height in pixels, or $null.
-# Combined with a page's own line count, this gives a fresh
-# pixels-per-row figure on every tick, so Screen1Select never needs a
-# manually-measured CharHeightPx - see Get-PipelinePageClickPoint in
+# Returns the target window's client-area size in pixels
+# (pscustomobject with Width/Height), or $null. Screen1Select divides
+# this by the fixed Screen1Select.GridRows/GridCols (32x80 for a
+# classic 3270 model 2 screen) to get pixels-per-row/pixels-per-column
+# fresh on every tick - no manual calibration, no click - see
+# Get-PipelinePageClickPoint in
 # AutoClipCaptureSqlPipelineScreen1Select.ps1.
-function Get-RelayClientHeight {
+function Get-RelayClientSize {
     param([IntPtr]$Handle)
     if ($Handle -eq [IntPtr]::Zero -or -not [Win32]::IsWindow($Handle)) { return $null }
     $rect = New-Object RECT
     if (-not [Win32]::GetClientRect($Handle, [ref]$rect)) { return $null }
+    $width  = $rect.Right - $rect.Left
     $height = $rect.Bottom - $rect.Top
-    if ($height -le 0) { return $null }
-    return $height
+    if ($width -le 0 -or $height -le 0) { return $null }
+    return [pscustomobject]@{ Width = $width; Height = $height }
 }
 
 Write-Host "AutoClipCapture is running." -ForegroundColor White
@@ -1416,10 +1394,7 @@ foreach ($hkId in $PipelineHotkeyMap.Keys) {
     }
     $selCfg = $p.Screen1Select
     if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-        $offset    = [int]$selCfg.ClickColumnOffset
-        $sideCount = [Math]::Abs($offset)
-        $side      = if ($offset -lt 0) { "left" } else { "right" }
-        Write-Host "                    Before pressing $($p.Hotkey.Display): click with the mouse $sideCount character(s) to the $side of the TOPMOST visible '$($selCfg.RowPrefixText)' row in the terminal, THEN press $($p.Hotkey.Display)." -ForegroundColor Yellow
+        Write-Host "                    Screen1Select: row-selection needs no mouse click and no calibration - it's computed from a fixed $($selCfg.GridRows)x$($selCfg.GridCols) screen grid, input column $($selCfg.InputColumn), topmost data row $($selCfg.DataStartRow)." -ForegroundColor Yellow
     }
 }
 Write-Host "Action key: $ActionKeyDisplay"
@@ -1478,10 +1453,7 @@ $global:CR_PipelineRewindPrevText    = $null # previous page's raw text while pr
 $global:CR_PipelineRewindPresses     = 0     # safety counter so a page that never stops changing can't loop forever
 $global:CR_PipelineComponentList     = @()   # component ids parsed out of the saved list file, in file order
 $global:CR_PipelineSelectSearchPages = 0     # how many times F8 has been pressed hunting for the *current* id
-$global:CR_PipelineClickOriginX      = $null # live mouse position (client-relative) captured when the pipeline hotkey fired
-$global:CR_PipelineClickOriginY      = $null
-$global:CR_PipelineSelectFoundRow    = $null # (Row, Col) of the row currently being selected, saved for the pre-Enter placement check
-$global:CR_PipelineSelectFoundCol    = $null
+$global:CR_PipelineSelectFoundRow    = $null # 0-based text-line index of the row currently being selected, saved for the pre-Enter placement check
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -1999,29 +1971,15 @@ $hotkeyAction = {
                 $listOutputPath = Join-Path $LogDir $safeListName
             }
 
-            # Screen1Select no longer uses any pre-measured pixel
-            # calibration. Instead, it reads the ACTUAL mouse cursor
-            # position right now - i.e. wherever you just clicked, per
-            # the startup reminder - and uses that single point as the
-            # click origin for every row this pipeline run selects.
-            # There's nothing to calibrate and nothing that blocks
-            # starting; if the cursor isn't usable, Screen1Select will
-            # say so (and stop safely) once it actually needs to click.
-            $global:CR_PipelineClickOriginX = $null
-            $global:CR_PipelineClickOriginY = $null
+            # Screen1Select needs no click, no mouse position, and no
+            # calibration file at all - row/column click points are
+            # computed straight from the target window's current client
+            # size and the fixed screen grid in Screen1Select.GridRows/
+            # GridCols/InputColumn/DataStartRow. Just a confirmation
+            # here, nothing blocking.
             $selCfg = $pipeline.Screen1Select
             if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-                $offset    = [int]$selCfg.ClickColumnOffset
-                $sideCount = [Math]::Abs($offset)
-                $side      = if ($offset -lt 0) { "left" } else { "right" }
-                $originPt  = Get-RelayClientMousePos -Handle $target.Handle
-                if ($null -eq $originPt) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Warning: couldn't read the mouse position over '$($target.Title)'. Click $sideCount character(s) to the $side of the topmost '$($selCfg.RowPrefixText)' row, then press this pipeline's hotkey again." -ForegroundColor Yellow
-                } else {
-                    $global:CR_PipelineClickOriginX = $originPt.X
-                    $global:CR_PipelineClickOriginY = $originPt.Y
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select click origin captured at client ($($originPt.X), $($originPt.Y)). Make sure that was $sideCount character(s) to the $side of the topmost '$($selCfg.RowPrefixText)' row - if it wasn't, stop the pipeline, click the right spot, and start it again." -ForegroundColor Cyan
-                }
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select: using a $($selCfg.GridRows)x$($selCfg.GridCols) grid, input column $($selCfg.InputColumn), topmost data row $($selCfg.DataStartRow) - no click or calibration needed." -ForegroundColor Cyan
             }
 
             Hide-RelayResultOverlay
@@ -2045,7 +2003,6 @@ $hotkeyAction = {
             $global:CR_PipelineRewindPresses    = 0
             $global:CR_PipelineComponentList    = @()
             $global:CR_PipelineSelectFoundRow   = $null
-            $global:CR_PipelineSelectFoundCol   = $null
             $global:CR_PipelineSelectSearchPages = 0
 
             $timer.Stop()
