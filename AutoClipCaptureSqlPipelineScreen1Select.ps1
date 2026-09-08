@@ -33,8 +33,8 @@
         search, so "KI001" can never match a row for "KI0011" or
         "KI001A"
           -> found -> click Screen1Select.ClickColumnOffset columns to
-             the side of that row's RowPrefixText (default -2, i.e.
-             two columns to its left - the classic ISPF-style
+             the side of that row's RowPrefixText (default -1, i.e.
+             one column to its left - the classic ISPF-style
              prefix/selection field)
              -> Select_ClickWait: clear the primary command line
                 (in case a previous attempt's action key ended up
@@ -643,6 +643,7 @@ function Invoke-PipelineScreen1SelectTick {
                 Stop-PipelineCapture
                 return
             }
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$targetId' not on this page - pressing $($selCfg.NextActionDisplay) for the next one." -ForegroundColor DarkCyan
             [System.Windows.Forms.SendKeys]::SendWait($selCfg.NextActionToken)
             $global:CR_PipelineState = 'Select_SearchPage'
             $global:CR_ElapsedMs = 0
@@ -756,7 +757,7 @@ function Invoke-PipelineScreen1SelectTick {
 
             $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
             if ($detected -eq 2) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$targetId' opened successfully -> screen 2. Going back." -ForegroundColor Green
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$targetId' opened successfully -> screen 2. Going back with $($selCfg.BackActionDisplay)." -ForegroundColor Green
                 $global:CR_PipelineState = 'Select_BackAction'
                 $global:CR_ElapsedMs = 0
             } elseif ($detected -eq 1) {
