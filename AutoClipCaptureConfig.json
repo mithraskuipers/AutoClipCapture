@@ -77,6 +77,7 @@
                                                 "Enabled":  true,
                                                 "RowPrefixText":  "COB",
                                                 "ActionKeyChar":  "B",
+                                                "CommandPromptText":  "Command ===>",
                                                 "ActionKeyEnterToken":  "{ENTER}",
                                                 "ClickColumnOffset":  -2,
                                                 "OriginX":  0,

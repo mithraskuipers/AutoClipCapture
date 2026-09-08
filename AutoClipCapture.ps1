@@ -445,6 +445,8 @@ using System.Text;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
 public static class Win32
 {
     [DllImport("user32.dll")]
@@ -491,6 +493,15 @@ public static class Win32
     // touching the window's actual on-screen position itself.
     [DllImport("user32.dll")]
     public static extern bool ClientToScreen(IntPtr hWnd, ref System.Drawing.Point lpPoint);
+
+    // Used by Set-Screen1SelectCalibrationFromMouse to turn the
+    // user's current mouse position into a client-relative point and
+    // to measure the target window's client pixel size.
+    [DllImport("user32.dll")]
+    public static extern bool ScreenToClient(IntPtr hWnd, ref System.Drawing.Point lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int X, int Y);
@@ -1353,6 +1364,13 @@ foreach ($hkId in $PipelineHotkeyMap.Keys) {
     } else {
         Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
     }
+    $selCfg = $p.Screen1Select
+    if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
+        $offset = [int]$selCfg.ClickColumnOffset
+        $sideCount = [Math]::Abs($offset)
+        $side = if ($offset -lt 0) { "left" } else { "right" }
+        Write-Host "                    Before pressing $($p.Hotkey.Display): click in the terminal with the mouse $sideCount character(s) to the $side of the TOPMOST visible '$($selCfg.RowPrefixText)' row." -ForegroundColor Yellow
+    }
 }
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
@@ -1927,21 +1945,14 @@ $hotkeyAction = {
                 $listOutputPath = Join-Path $LogDir $safeListName
             }
 
-            # Screen1Select needs the mouse positioned correctly before
-            # it starts clicking rows - just a reminder here, nothing
-            # interactive/blocking. Calibrate the click grid once via
-            # CalibrateScreen1AutoGuided.bat if OriginX/OriginY/
-            # CharWidthPx/CharHeightPx aren't set yet.
+            # Screen1Select's click grid is derived silently from
+            # wherever the mouse currently is - the startup banner
+            # tells the user to click the terminal at the right spot
+            # before pressing this hotkey. No dialog, no separate
+            # calibration script.
             $selCfg = $pipeline.Screen1Select
             if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-                $offset = [int]$selCfg.ClickColumnOffset
-                $sideCount = [Math]::Abs($offset)
-                $side = if ($offset -lt 0) { "left" } else { "right" }
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Reminder: position the mouse cursor $sideCount character(s) to the $side of the topmost visible '$($selCfg.RowPrefixText)' row before this pipeline reaches Screen1Select." -ForegroundColor Cyan
-
-                if ([double]$selCfg.CharWidthPx -le 0 -or [double]$selCfg.CharHeightPx -le 0) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled - Screen1Select isn't calibrated yet (CharWidthPx/CharHeightPx are 0)." -ForegroundColor Red
-                    Write-Host "  Run CalibrateScreen1AutoGuided.bat once to measure OriginX/OriginY/CharWidthPx/CharHeightPx." -ForegroundColor Yellow
+                if (-not (Set-Screen1SelectCalibrationFromMouse -Pipeline $pipeline -Handle $target.Handle)) {
                     Hide-RelayStatus
                     return
                 }
