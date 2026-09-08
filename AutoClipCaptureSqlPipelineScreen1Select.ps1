@@ -33,44 +33,26 @@
         search, so "KI001" can never match a row for "KI0011" or
         "KI001A"
           -> found -> click Screen1Select.ClickColumnOffset columns to
-             the side of that row's RowPrefixText (default -2, i.e.
-             two columns to its left - the classic ISPF-style
-             prefix/selection field)
-             -> Select_ClickWait: clear the primary command line
-                (in case a previous attempt's action key ended up
-                there instead of in a row's prefix field - see the
-                contamination check below) and re-click the row,
-                then type Screen1Select.ActionKeyChar (default "B")
-                *without* pressing Enter yet
-             -> Select_TypeWait -> Select_VerifyPlacementCopy: copy
-                the screen again and check, BEFORE pressing Enter:
-                  a) the action key character actually landed exactly
-                     Screen1Select.ClickColumnOffset columns to the
-                     side of the target row's RowPrefixText - i.e. is
-                     really sitting in that row's prefix field - and
-                  b) Screen1Select.CommandPromptText (default
-                     "Command ===>") is NOT immediately followed by
-                     the action key character anywhere on the page -
-                     which is what it looks like when the character
-                     lands in the primary command line instead of a
-                     row's prefix field.
-                Both have to pass, or Enter never gets pressed for
-                this id at all - see "Placement verification" below.
-             -> Select_EnterAction -> Select_EnterWait ->
-                Select_VerifyCopy: copy again and check which screen
-                we're on
-                  -> screen 2 -> it worked. Log it, go back with F3
-                     (Select_BackAction -> Select_BackWait), then move
-                     on to the next id. (What happens after landing on
-                     screen 2 is a separate feature to be added later -
-                     for now this phase's job ends at "F3 back, try
-                     the next one", so the row-selection mechanism
-                     itself can be watched and verified end to end
-                     before anything gets built on top of it.)
-                  -> still screen 1 -> unavailable (same
-                     Component.UnavailableText check Screen 1's
-                     classic zoom flow already uses) - move on to the
-                     next id directly, no F3 needed.
+             the side of that row's RowPrefixText (default -1, i.e.
+             one column to its left - the classic ISPF-style
+             prefix/selection field), then type
+             Screen1Select.ActionKeyChar (default "B") and press Enter
+             -> Select_ClickWait -> Select_TypeWait ->
+             Select_VerifyCopy: copy again and check which screen
+             we're on
+               -> screen 2 -> it worked. Log it, go back with F3
+                  (Select_BackAction -> Select_BackWait), then move on
+                  to the next id. (What happens after landing on
+                  screen 2 is a separate feature to be added later -
+                  for now this phase's job ends at "F3 back, try the
+                  next one", so the row-selection mechanism itself can
+                  be watched and verified end to end before anything
+                  gets built on top of it.)
+               -> still screen 1 -> unavailable (same
+                  Component.UnavailableText check Screen 1's classic
+                  zoom flow already uses) or the click/type simply
+                  didn't land - either way, already on screen 1, so
+                  just move on to the next id directly, no F3 needed.
           -> not found, and the page doesn't say
              ComponentList.BottomOfListText either -> press F8
              (Screen1Select.NextActionToken) and search the next page
@@ -93,52 +75,54 @@
  faster Screen1Select.RewindStepDelayMs (default 300ms) instead. Falls
  back to StepDelayMs if RewindStepDelayMs isn't set in the config.
 
- ---- Mouse-click calibration ----
- Every click is computed as a plain grid formula, in CLIENT-relative
- pixels (i.e. relative to the target window's own client area):
+ ---- Click origin: no calibration file, just click and go ----
+ There is no calibration step or calibration file anymore. Before
+ pressing this pipeline's hotkey, you click the mouse
+ Screen1Select.ClickColumnOffset character(s) from the TOPMOST visible
+ row's RowPrefixText (e.g. "COB") - the app prints a reminder of the
+ exact spot every time it starts. The moment the hotkey fires,
+ AutoClipCapture.ps1 reads the real mouse position over the target
+ window (Get-RelayClientMousePos) and keeps it as
+ $global:CR_PipelineClickOriginX/Y for the rest of this pipeline run.
 
-     ClientX = Screen1Select.OriginX + Column * Screen1Select.CharWidthPx
-     ClientY = Screen1Select.OriginY + Row    * Screen1Select.CharHeightPx
+ Every other row's click point is then worked out fresh, on every
+ page, from that one origin plus whatever's actually on screen right
+ now - no fixed pixels-per-character number is stored anywhere:
+   1. Find-PipelineFirstComponentRow finds the topmost RowPrefixText
+      row on the CURRENT page's raw clipboard text. Because the
+      topmost data row always renders at the same screen position no
+      matter which page of the list is showing, this row's on-screen
+      Y is always the same as the origin's Y - it's just a different
+      row of the underlying text every time you page down.
+   2. Get-RelayClientHeight reads the window's current client-area
+      height; dividing it by the current page's line count gives
+      pixels-per-row for THIS page.
+   3. ClientY = OriginY + (TargetRow - TopRow) * pixelsPerRow
+      ClientX = OriginX (always the same column - the prefix field
+      sits ClickColumnOffset characters from RowPrefixText on every
+      row, same as it did on the row you originally clicked).
+ See Get-PipelinePageClickPoint below.
 
- ...where Row/Column are 0-based positions *within the raw clipboard
- text* (Row = which line, Column = character offset into that line),
- and OriginX/OriginY are the pixel position of ROW 0 / COLUMN 0 of
- that same text - not the position of any particular row.
-
- There's no separate calibration script/session for this anymore.
- Instead, AutoClipCapture.ps1's startup banner tells the user, for
- every pipeline with Screen1Select enabled: click the terminal with
- the mouse Screen1Select.ClickColumnOffset column(s) to the side of
- the TOPMOST visible RowPrefixText row before pressing that pipeline's
- hotkey. Set-Screen1SelectCalibrationFromMouse (below) then reads
- wherever the mouse happens to be right at that moment, copies the
- screen the user is looking at to find the real (Row, Col) of that
- topmost row, measures the window's client pixel size, and back-solves
- OriginX/OriginY/CharWidthPx/CharHeightPx from those two things - no
- dialog, nothing else needed from the user. If it can't find a
- RowPrefixText row on the currently-visible screen (i.e. the user
- hadn't actually navigated/clicked there yet), it says so in the
- console and the pipeline doesn't start - just click the right spot
- and press the hotkey again.
-
- ---- Placement verification ----
- Because a click landing even one row or column off can end up typing
- the action key character into the wrong field - including the
- terminal's own primary command line, which silently accepts stray
- letters as commands - every attempt is verified with a Ctrl+C copy
- BEFORE Enter is pressed, not after: see Test-Screen1SelectPlacement
- below. The command line also gets defensively cleared right before
- every attempt (Select_ClickWait), regardless of whether the previous
- attempt was judged to have gone wrong, so a stray character from one
- attempt can never carry over and contaminate the next.
+ ---- Verify before Enter ----
+ After clicking and typing Screen1Select.ActionKeyChar (e.g. "B"), the
+ pipeline does NOT press Enter right away. It copies the screen again
+ first and checks two things (Test-PipelineActionCharPlacement):
+   - the character actually landed at ClickColumnOffset from the
+     target row's RowPrefixText, and nowhere else;
+   - the "Command ===>" line did not pick up that character (the
+     classic symptom of a wrong click origin).
+ Only if both checks pass does it press Enter. If either fails, it
+ logs why, shows an on-screen "MISPLACED" warning, and stops the
+ pipeline without pressing Enter - clear the stray character by hand,
+ re-click the correct spot, and start the pipeline again.
 
  Relies on shared state/helpers defined in AutoClipCapture.ps1
  ($global:CR_* pipeline state, $TimerTickMs / $CopyDelayMs, $LogDir,
  Set-RelayForeground, Set-RelayStatus, Test-RelayTextContains,
  Update-PipelineScreenTracking, Show-RelayResultOverlay,
- Invoke-RelayMouseClick, Stop-PipelineCapture) - all in scope here
- because this file is dot-sourced directly into that script, not run
- standalone.
+ Invoke-RelayMouseClick, Get-RelayClientHeight, Stop-PipelineCapture)
+ - all in scope here because this file is dot-sourced directly into
+ that script, not run standalone.
 =====================================================================
 #>
 
@@ -198,21 +182,11 @@ function Find-PipelineComponentRow {
     return $null
 }
 
-# Computes the CLIENT-relative pixel point for a 0-based (Row, Col)
-# text position, using the Screen1Select calibration fields. See the
-# header comment above for what these mean and how to measure them.
-function Get-PipelineGridClickPoint {
-    param([int]$Row, [int]$Col, $SelectCfg)
-    $x = [double]$SelectCfg.OriginX + ($Col * [double]$SelectCfg.CharWidthPx)
-    $y = [double]$SelectCfg.OriginY + ($Row * [double]$SelectCfg.CharHeightPx)
-    return New-Object System.Drawing.Point([int][Math]::Round($x), [int][Math]::Round($y))
-}
-
-# Same raw-text scan as Find-PipelineComponentRow above, but matches
-# on RowPrefixText alone (no target id) - used by the mouse-based
-# calibration below to find the topmost visible row, whatever id it
-# has.
-function Find-PipelineFirstRowWithPrefix {
+# Like Find-PipelineComponentRow, but returns the TOPMOST row whose
+# first whitespace token is RowPrefixText, regardless of which id it
+# is. Used as the per-page reference point for click-point math - see
+# Get-PipelinePageClickPoint below.
+function Find-PipelineFirstComponentRow {
     param(
         [string]$Text,
         [string]$RowPrefixText
@@ -221,12 +195,11 @@ function Find-PipelineFirstRowWithPrefix {
 
     $lines = $Text -split "`r`n|`r|`n"
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        $trimmed = $line.Trim()
+        $trimmed = $lines[$i].Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
         $tokens = $trimmed -split '\s+'
         if ($tokens.Count -ge 1 -and $tokens[0] -eq $RowPrefixText) {
-            $col = $line.IndexOf($RowPrefixText, [StringComparison]::OrdinalIgnoreCase)
+            $col = $lines[$i].IndexOf($RowPrefixText, [StringComparison]::OrdinalIgnoreCase)
             if ($col -lt 0) { $col = 0 }
             return [pscustomobject]@{ Row = $i; Col = $col }
         }
@@ -234,177 +207,71 @@ function Find-PipelineFirstRowWithPrefix {
     return $null
 }
 
-# ---------------------------------------------------------------------
-# Set-Screen1SelectCalibrationFromMouse
-#
-# No dialog, nothing interactive - just reads wherever the mouse
-# currently is (the user was told, in the startup banner, to click
-# there before pressing this pipeline's hotkey) and derives
-# OriginX/OriginY/CharWidthPx/CharHeightPx from it:
-#
-#   1. Copies the screen the user is looking at right now and finds
-#      the real (Row, Col) of the topmost RowPrefixText row in the raw
-#      clipboard text - using the exact same parsing
-#      (Find-PipelineFirstRowWithPrefix, built the same way as
-#      Find-PipelineComponentRow) that the live row search uses at
-#      runtime, so calibration and matching can never drift apart.
-#   2. Reads the window's client pixel size and divides by the
-#      terminal's fixed 80x32 character grid to get
-#      CharWidthPx/CharHeightPx.
-#   3. Back-solves OriginX/OriginY so the grid formula
-#         ClientX = OriginX + Col * CharWidthPx
-#         ClientY = OriginY + Row * CharHeightPx
-#      reproduces exactly where the mouse is right now for that
-#      measured (Row, Col).
-#   4. Saves the result into this pipeline's Screen1Select block and
-#      persists AutoClipCaptureConfig.json (after backing up the old
-#      one), then returns $true so the pipeline can start immediately.
-#
-# Returns $false (nothing changed, nothing clicked/typed) if the
-# target window can't be measured, or no RowPrefixText row is visible
-# right now to measure against - in which case the user just needs to
-# click the right spot and press the hotkey again.
-# ---------------------------------------------------------------------
-function Set-Screen1SelectCalibrationFromMouse {
-    param($Pipeline, [IntPtr]$Handle)
-
-    $selCfg = $Pipeline.Screen1Select
-    $offset = [int]$selCfg.ClickColumnOffset
-
-    # Grab the cursor position immediately - nothing between here and
-    # using it should move the real mouse pointer.
-    $cursorScreenPos = [System.Windows.Forms.Cursor]::Position
-
-    if (-not (Set-RelayForeground -Handle $Handle)) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Target window is gone - start cancelled." -ForegroundColor Red
-        return $false
-    }
-
-    [System.Windows.Forms.SendKeys]::SendWait('^c')
-    Start-Sleep -Milliseconds 300
-
-    $text = ''
-    try {
-        if ([System.Windows.Forms.Clipboard]::ContainsText()) {
-            $text = [System.Windows.Forms.Clipboard]::GetText()
-        }
-    } catch {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
-    }
-
-    $found = Find-PipelineFirstRowWithPrefix -Text $text -RowPrefixText $selCfg.RowPrefixText
-    if ($null -eq $found) {
-        $sideCount = [Math]::Abs($offset)
-        $side = if ($offset -lt 0) { "left" } else { "right" }
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Start cancelled - no '$($selCfg.RowPrefixText)' row visible on the current screen." -ForegroundColor Red
-        Write-Host "  Click the terminal $sideCount character(s) to the $side of the TOPMOST visible '$($selCfg.RowPrefixText)' row, then press this pipeline's hotkey again." -ForegroundColor Yellow
-        return $false
-    }
-
-    $clientPt = New-Object System.Drawing.Point($cursorScreenPos.X, $cursorScreenPos.Y)
-    if (-not [Win32]::ScreenToClient($Handle, [ref]$clientPt)) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Couldn't convert the mouse position - start cancelled." -ForegroundColor Red
-        return $false
-    }
-
-    $rect = New-Object RECT
-    if (-not [Win32]::GetClientRect($Handle, [ref]$rect)) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Couldn't read the target window's size - start cancelled." -ForegroundColor Red
-        return $false
-    }
-    $clientW = $rect.Right - $rect.Left
-    $clientH = $rect.Bottom - $rect.Top
-    if ($clientW -le 0 -or $clientH -le 0) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Target window has no usable size - start cancelled." -ForegroundColor Red
-        return $false
-    }
-
-    $cols = 80
-    $rows = 32
-    $charWidthPx  = $clientW / $cols
-    $charHeightPx = $clientH / $rows
-
-    $clickCol = $found.Col + $offset
-
-    $originX = $clientPt.X - ($clickCol  * $charWidthPx)
-    $originY = $clientPt.Y - ($found.Row * $charHeightPx)
-
-    $selCfg.OriginX      = [math]::Round($originX, 2)
-    $selCfg.OriginY      = [math]::Round($originY, 2)
-    $selCfg.CharWidthPx  = [math]::Round($charWidthPx, 2)
-    $selCfg.CharHeightPx = [math]::Round($charHeightPx, 2)
-
-    try {
-        $backupPath = Join-Path $PSScriptRoot ("AutoClipCaptureConfig.backup-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-        if (Test-Path $ConfigPath) { Copy-Item -Path $ConfigPath -Destination $backupPath -Force }
-        $Config | ConvertTo-Json -Depth 20 | Set-Content -Path $ConfigPath -Encoding UTF8
-    } catch {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Calibrated for this run, but saving to config failed: $_" -ForegroundColor Yellow
-    }
-
-    Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Calibrated from mouse position - OriginX=$($selCfg.OriginX) OriginY=$($selCfg.OriginY) CharWidthPx=$($selCfg.CharWidthPx) CharHeightPx=$($selCfg.CharHeightPx)." -ForegroundColor Green
-    return $true
-}
-
-# ---------------------------------------------------------------------
-# Test-Screen1SelectPlacement
-#
-# Called after the action key character has been typed but BEFORE
-# Enter is pressed. Copies the screen (the caller passes in that raw
-# text) and checks two things:
-#
-#   a) The character actually sitting Screen1Select.ClickColumnOffset
-#      column(s) to the side of TargetId's RowPrefixText really is
-#      ActionKeyChar - i.e. it landed in that row's prefix field, and
-#      nowhere else. Re-finds the row fresh (same parsing as the live
-#      search) rather than trusting the row/column found earlier, so
-#      this check can't be fooled by anything that shifted between the
-#      click and now.
-#   b) CommandPromptText (default "Command ===>") is NOT immediately
-#      followed by ActionKeyChar anywhere in the text - that pattern
-#      only appears when the character landed in the terminal's
-#      primary command line instead of a row's prefix field.
-#
-# Returns a pscustomobject: { Ok, Reason, Row, Col }. Ok is $true only
-# when both checks pass.
-# ---------------------------------------------------------------------
-function Test-Screen1SelectPlacement {
+# Computes the CLIENT-relative pixel point to click for TargetRow (a
+# 0-based line index into $Text), using the live click origin captured
+# at pipeline-start ($global:CR_PipelineClickOriginX/Y) plus whatever
+# is actually on screen right now - no stored per-character pixel
+# size. Returns $null if the origin was never captured, the topmost
+# row can't be found on this page, or the window's client height is
+# unavailable - callers must treat $null as "can't click safely right
+# now" and stop rather than guess. See the header comment above for
+# the full explanation.
+function Get-PipelinePageClickPoint {
     param(
         [string]$Text,
-        [string]$TargetId,
-        $SelectCfg
+        [int]$TargetRow,
+        [string]$RowPrefixText,
+        [IntPtr]$Handle
     )
+    if ($null -eq $global:CR_PipelineClickOriginX -or $null -eq $global:CR_PipelineClickOriginY) { return $null }
 
-    $offset = [int]$SelectCfg.ClickColumnOffset
-    $actionChar = [string]$SelectCfg.ActionKeyChar
-    $cmdPromptText = if ($SelectCfg.PSObject.Properties.Name -contains 'CommandPromptText' -and $SelectCfg.CommandPromptText) {
-        [string]$SelectCfg.CommandPromptText
-    } else {
-        'Command ===>'
-    }
+    $topRow = Find-PipelineFirstComponentRow -Text $Text -RowPrefixText $RowPrefixText
+    if ($null -eq $topRow) { return $null }
 
-    # b) Command-line contamination check - anywhere in the text.
-    $contamPattern = [regex]::Escape($cmdPromptText) + '\s*' + [regex]::Escape($actionChar)
-    if ([regex]::IsMatch($Text, $contamPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
-        return [pscustomobject]@{ Ok = $false; Reason = "'$actionChar' appears right after '$cmdPromptText' - it landed in the command line, not the row's prefix field"; Row = -1; Col = -1 }
-    }
-
-    # a) Placement check - re-find the row fresh.
-    $found = Find-PipelineComponentRow -Text $Text -RowPrefixText $SelectCfg.RowPrefixText -TargetId $TargetId
-    if ($null -eq $found) {
-        return [pscustomobject]@{ Ok = $false; Reason = "row for '$TargetId' isn't on screen anymore"; Row = -1; Col = -1 }
-    }
-
-    $expectedCol = $found.Col + $offset
     $lines = $Text -split "`r`n|`r|`n"
-    $line = $lines[$found.Row]
-    $actualChar = if ($expectedCol -ge 0 -and $expectedCol -lt $line.Length) { $line.Substring($expectedCol, 1) } else { '' }
+    if ($lines.Count -le 0) { return $null }
 
-    if ($actualChar -ne $actionChar) {
-        return [pscustomobject]@{ Ok = $false; Reason = "expected '$actionChar' $([Math]::Abs($offset)) column(s) from '$($SelectCfg.RowPrefixText)' on row $($found.Row), found '$actualChar' instead"; Row = $found.Row; Col = $expectedCol }
+    $clientHeight = Get-RelayClientHeight -Handle $Handle
+    if ($null -eq $clientHeight) { return $null }
+
+    $pixelsPerRow = [double]$clientHeight / [double]$lines.Count
+    $rowDelta     = $TargetRow - $topRow.Row
+    $x = [double]$global:CR_PipelineClickOriginX
+    $y = [double]$global:CR_PipelineClickOriginY + ($rowDelta * $pixelsPerRow)
+    return New-Object System.Drawing.Point([int][Math]::Round($x), [int][Math]::Round($y))
+}
+
+# Checks whether Screen1Select.ActionKeyChar actually landed exactly
+# ClickColumnOffset character(s) from the target row's RowPrefixText -
+# and, just as importantly, that it did NOT land on the "Command ===>"
+# line, which is the classic sign of a wrong click origin. Re-reads
+# the row by its saved (Row, Col) rather than re-searching for the id,
+# since once the action character is typed, that row's own leading
+# token is no longer RowPrefixText.
+function Test-PipelineActionCharPlacement {
+    param(
+        [string]$Text,
+        [int]$Row,
+        [int]$Col,
+        [string]$ExpectedChar
+    )
+    $result = [pscustomobject]@{ Placed = $false; OnCommandLine = $false }
+    if ([string]::IsNullOrEmpty($Text)) { return $result }
+
+    $lines = $Text -split "`r`n|`r|`n"
+
+    $commandPattern = "Command\s*===>\s*" + [regex]::Escape($ExpectedChar) + "(\s|$)"
+    if (($lines -join "`n") -match $commandPattern) {
+        $result.OnCommandLine = $true
+        return $result
     }
 
-    return [pscustomobject]@{ Ok = $true; Reason = 'placement verified'; Row = $found.Row; Col = $expectedCol }
+    if ($Row -lt 0 -or $Row -ge $lines.Count -or $Col -lt 0) { return $result }
+    $line = $lines[$Row]
+    if ($Col -ge $line.Length) { return $result }
+
+    $result.Placed = ($line.Substring($Col, 1) -eq $ExpectedChar)
+    return $result
 }
 
 # Advances to the next id in the list (or finishes the pipeline if
@@ -599,15 +466,30 @@ function Invoke-PipelineScreen1SelectTick {
 
             $found = Find-PipelineComponentRow -Text $text -RowPrefixText $selCfg.RowPrefixText -TargetId $targetId
             if ($null -ne $found) {
-                $clickCol = $found.Col + [int]$selCfg.ClickColumnOffset
-                $pt = Get-PipelineGridClickPoint -Row $found.Row -Col $clickCol -SelectCfg $selCfg
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: found '$targetId' at row $($found.Row) - clicking (row $($found.Row), col $clickCol)." -ForegroundColor DarkCyan
+                if ($null -eq $global:CR_PipelineClickOriginX -or $null -eq $global:CR_PipelineClickOriginY) {
+                    $side = if ([int]$selCfg.ClickColumnOffset -lt 0) { "left" } else { "right" }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: no click origin captured. Click $([Math]::Abs([int]$selCfg.ClickColumnOffset)) character(s) to the $side of the topmost '$($selCfg.RowPrefixText)' row, then start this pipeline again." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "NO CLICK ORIGIN - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                $pt = Get-PipelinePageClickPoint -Text $text -TargetRow $found.Row -RowPrefixText $selCfg.RowPrefixText -Handle $global:CR_TargetHandle
+                if ($null -eq $pt) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: couldn't work out a click point for '$targetId' (topmost row or window size unavailable) - stopping." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "CLICK POINT FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: found '$targetId' at row $($found.Row) - clicking (client $($pt.X), $($pt.Y))." -ForegroundColor DarkCyan
                 if (-not (Invoke-RelayMouseClick -Handle $global:CR_TargetHandle -ClientX $pt.X -ClientY $pt.Y)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
                     return
                 }
-                $global:CR_PipelineSelectClickPoint = $pt
+                $global:CR_PipelineSelectFoundRow = $found.Row
+                $global:CR_PipelineSelectFoundCol = $found.Col
                 $global:CR_PipelineState = 'Select_ClickWait'
                 $global:CR_ElapsedMs = 0
                 return
@@ -636,13 +518,9 @@ function Invoke-PipelineScreen1SelectTick {
             $global:CR_ElapsedMs = 0
         }
 
-        # ---- Click landed. Before typing the action key: defensively
-        # clear the primary command line (in case a previous attempt's
-        # character ended up there instead of in a row's prefix
-        # field), then re-click the target row (clearing the command
-        # line likely moved focus away from it) and type the action
-        # key character - but NOT Enter yet, that only happens after
-        # Select_VerifyPlacementCopy confirms it landed correctly. ----
+        # ---- Click landed - type ONLY the action key (no Enter yet),
+        # then copy and verify it landed in the right place before
+        # committing with Enter. ----
         'Select_ClickWait' {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -lt $delay) { return }
@@ -652,18 +530,11 @@ function Invoke-PipelineScreen1SelectTick {
                 Stop-PipelineCapture
                 return
             }
-            [System.Windows.Forms.SendKeys]::SendWait('{HOME}' + (' ' * 30))
-            $pt = $global:CR_PipelineSelectClickPoint
-            if (-not (Invoke-RelayMouseClick -Handle $global:CR_TargetHandle -ClientX $pt.X -ClientY $pt.Y)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                Stop-PipelineCapture
-                return
-            }
             [System.Windows.Forms.SendKeys]::SendWait($selCfg.ActionKeyChar)
-            $global:CR_PipelineState = 'Select_TypeWait'
+            $global:CR_PipelineState = 'Select_VerifyPlacementWait'
             $global:CR_ElapsedMs = 0
         }
-        'Select_TypeWait' {
+        'Select_VerifyPlacementWait' {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -lt $delay) { return }
 
@@ -676,11 +547,6 @@ function Invoke-PipelineScreen1SelectTick {
             $global:CR_PipelineState = 'Select_VerifyPlacementCopy'
             $global:CR_ElapsedMs = 0
         }
-
-        # ---- BEFORE pressing Enter: copy and verify the action key
-        # character really landed in the target row's prefix field,
-        # and definitely not next to the command prompt. Enter is only
-        # ever sent from Select_EnterAction, once this has passed. ----
         'Select_VerifyPlacementCopy' {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -lt $delay) { return }
@@ -695,27 +561,31 @@ function Invoke-PipelineScreen1SelectTick {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
             }
 
-            $check = Test-Screen1SelectPlacement -Text $text -TargetId $targetId -SelectCfg $selCfg
-            if ($check.Ok) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$targetId' - placement verified (row $($check.Row), col $($check.Col)). Pressing Enter." -ForegroundColor DarkCyan
-                $global:CR_PipelineState = 'Select_EnterAction'
-                $global:CR_ElapsedMs = 0
-            } else {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$targetId' - placement check FAILED ($($check.Reason)). NOT pressing Enter - skipping this component." -ForegroundColor Red
-                Complete-PipelineComponentSelection -Pipeline $pipeline
+            $placeCol  = $global:CR_PipelineSelectFoundCol + [int]$selCfg.ClickColumnOffset
+            $placement = Test-PipelineActionCharPlacement -Text $text -Row $global:CR_PipelineSelectFoundRow -Col $placeCol -ExpectedChar $selCfg.ActionKeyChar
+
+            if ($placement.OnCommandLine -or -not $placement.Placed) {
+                if ($placement.OnCommandLine) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$($selCfg.ActionKeyChar)' landed on the Command line instead of next to '$targetId' - the click origin is wrong. Stopping before pressing Enter." -ForegroundColor Red
+                } else {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: '$($selCfg.ActionKeyChar)' did not land $([Math]::Abs([int]$selCfg.ClickColumnOffset)) character(s) from '$targetId' as expected - the click origin is wrong. Stopping before pressing Enter." -ForegroundColor Red
+                }
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clear the stray '$($selCfg.ActionKeyChar)' by hand, click the correct spot again, then start the pipeline again." -ForegroundColor Yellow
+                Show-RelayResultOverlay -Text "MISPLACED '$($selCfg.ActionKeyChar)' - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
             }
-        }
-        'Select_EnterAction' {
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
                 return
             }
             [System.Windows.Forms.SendKeys]::SendWait($selCfg.ActionKeyEnterToken)
-            $global:CR_PipelineState = 'Select_EnterWait'
+            $global:CR_PipelineState = 'Select_TypeWait'
             $global:CR_ElapsedMs = 0
         }
-        'Select_EnterWait' {
+        'Select_TypeWait' {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -lt $delay) { return }
 
