@@ -205,7 +205,6 @@ function Get-DefaultConfig {
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C"; RequireRightModifier = $false }  # Ctrl+Alt+C
         ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }  # Ctrl+Alt+X
         F3Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }     # Alt+Shift+Comma ('<') -> single F3 press
-        ProbeHotkey           = [pscustomobject]@{ Modifiers = 6; Key = 0x49; Display = "Ctrl+Shift+I"; RequireRightModifier = $false }  # diagnostic: move mouse to computed Screen1Select click point, no click/keys sent
         ResultOverlayDurationMs = 4000
         Modes                 = @( Get-DefaultSqlSearchMode )
         Pipelines             = @()
@@ -374,7 +373,7 @@ function Add-PipelineComponentListDefaults {
         SkipRowsEnd        = 3
         DupDetectThreshold = 0.995
         MaxPages           = 500
-        OutputFileName     = 'pipeline_component_list.txt'
+        OutputFileName     = 'pipeline_component_list.md'
     }
 
     if (-not ($Pipeline.PSObject.Properties.Name -contains 'ComponentList') -or $null -eq $Pipeline.ComponentList) {
@@ -432,20 +431,6 @@ if ($Config.PSObject.Properties.Name -contains 'F3Hotkey' -and $null -ne $Config
     $F3RequireRightModifier = [bool]$f3Default.RequireRightModifier
 }
 $F3ActionKeyToken = '{F3}'
-
-$ProbeHotkeyId   = 4
-if ($Config.PSObject.Properties.Name -contains 'ProbeHotkey' -and $null -ne $Config.ProbeHotkey) {
-    $ProbeModifiers = [int]$Config.ProbeHotkey.Modifiers
-    $ProbeKey       = [int]$Config.ProbeHotkey.Key
-    $ProbeDisplay   = [string]$Config.ProbeHotkey.Display
-    $ProbeRequireRightModifier = ($Config.ProbeHotkey.PSObject.Properties.Name -contains 'RequireRightModifier') -and [bool]$Config.ProbeHotkey.RequireRightModifier
-} else {
-    $probeDefault   = (Get-DefaultConfig).ProbeHotkey
-    $ProbeModifiers = [int]$probeDefault.Modifiers
-    $ProbeKey       = [int]$probeDefault.Key
-    $ProbeDisplay   = [string]$probeDefault.Display
-    $ProbeRequireRightModifier = [bool]$probeDefault.RequireRightModifier
-}
 # ----------------------------------------------------------------------
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -459,15 +444,6 @@ using System;
 using System.Text;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
-
-[StructLayout(LayoutKind.Sequential)]
-public struct RECT
-{
-    public int Left;
-    public int Top;
-    public int Right;
-    public int Bottom;
-}
 
 public static class Win32
 {
@@ -506,36 +482,6 @@ public static class Win32
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
-
-    // ---- Mouse-click support (Screen1Select pipeline phase) ----
-    // ClientToScreen takes a point *relative to a window's client
-    // area* and turns it into absolute screen coordinates - which is
-    // exactly what SetCursorPos needs, and lets the caller reason
-    // purely in "column/row inside this window" terms without ever
-    // touching the window's actual on-screen position itself.
-    [DllImport("user32.dll")]
-    public static extern bool ClientToScreen(IntPtr hWnd, ref System.Drawing.Point lpPoint);
-
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int X, int Y);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
-
-    // ---- Fixed-grid geometry support (Screen1Select pipeline phase) ----
-    // The target screen is a fixed-size character grid (rows x cols
-    // configured in Screen1Select.GridRows/GridCols - 32x80 for a
-    // classic 3270 model 2 screen). GetClientRect gives the window's
-    // current client pixel size, which - divided by the known
-    // row/column count - turns any (row, col) grid position into a
-    // pixel point with no manual calibration at all. See
-    // Get-RelayClientSize below and Get-PipelinePageClickPoint in
-    // AutoClipCaptureSqlPipelineScreen1Select.ps1.
-    [DllImport("user32.dll")]
-    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 }
 
 public class HotkeyForm : Form
@@ -782,9 +728,6 @@ if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ExitHotkeyId, $ExitModifiers
 }
 if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $F3HotkeyId, $F3Modifiers, $F3Key)) {
     Write-Host "Failed to register the F3 hotkey ($F3Display). It may already be in use by another app." -ForegroundColor Red
-}
-if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ProbeHotkeyId, $ProbeModifiers, $ProbeKey)) {
-    Write-Host "Failed to register the PROBE hotkey ($ProbeDisplay). It may already be in use by another app." -ForegroundColor Red
 }
 
 # ---- Register one global hotkey per enabled Mode. IDs start at 100 so
@@ -1351,97 +1294,11 @@ function Set-RelayForeground {
     return $true
 }
 
-# Left-clicks at a CLIENT-relative point (i.e. relative to the target
-# window's own client area, not the desktop) inside the given window:
-# brings it to the foreground first (same as every other action this
-# tool sends), converts (ClientX, ClientY) to absolute screen
-# coordinates via ClientToScreen, moves the real cursor there, then
-# fires a left button down/up. Used by the Screen1Select pipeline
-# phase to click into a row's prefix/selection field before typing
-# into it - see AutoClipCaptureSqlPipelineScreen1Select.ps1 for how
-# (ClientX, ClientY) gets computed from a text row/column.
-function Invoke-RelayMouseClick {
-    param(
-        [IntPtr]$Handle,
-        [int]$ClientX,
-        [int]$ClientY
-    )
-    if (-not (Set-RelayForeground -Handle $Handle)) { return $false }
-
-    $pt = New-Object System.Drawing.Point($ClientX, $ClientY)
-    if (-not [Win32]::ClientToScreen($Handle, [ref]$pt)) { return $false }
-
-    [void][Win32]::SetCursorPos($pt.X, $pt.Y)
-    Start-Sleep -Milliseconds 30
-    [Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)   # MOUSEEVENTF_LEFTDOWN
-    Start-Sleep -Milliseconds 30
-    [Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)   # MOUSEEVENTF_LEFTUP
-    return $true
-}
-
-# Diagnostic only - moves the real mouse cursor to a CLIENT-relative
-# point WITHOUT clicking or sending any keystrokes, so it's safe to
-# use against a live screen to see exactly where a computed point
-# lands. See the ProbeHotkey handler in this file's hotkeyAction.
-function Move-RelayMouseTo {
-    param(
-        [IntPtr]$Handle,
-        [int]$ClientX,
-        [int]$ClientY
-    )
-    if (-not (Set-RelayForeground -Handle $Handle)) { return $false }
-    $pt = New-Object System.Drawing.Point($ClientX, $ClientY)
-    if (-not [Win32]::ClientToScreen($Handle, [ref]$pt)) { return $false }
-    [void][Win32]::SetCursorPos($pt.X, $pt.Y)
-    return $true
-}
-
-# Returns the target window's client-area size in pixels
-# (pscustomobject with Width/Height), or $null. Screen1Select divides
-# this by the fixed Screen1Select.GridRows/GridCols (32x80 for a
-# classic 3270 model 2 screen) to get pixels-per-row/pixels-per-column
-# fresh on every tick - no manual calibration, no click - see
-# Get-PipelinePageClickPoint in
-# AutoClipCaptureSqlPipelineScreen1Select.ps1.
-function Get-RelayClientSize {
-    param([IntPtr]$Handle)
-    if ($Handle -eq [IntPtr]::Zero -or -not [Win32]::IsWindow($Handle)) { return $null }
-    $rect = New-Object RECT
-    if (-not [Win32]::GetClientRect($Handle, [ref]$rect)) { return $null }
-    $width  = $rect.Right - $rect.Left
-    $height = $rect.Bottom - $rect.Top
-    if ($width -le 0 -or $height -le 0) { return $null }
-    return [pscustomobject]@{ Width = $width; Height = $height }
-}
-
-# Diagnostic only - not used by the pipeline itself. Reports both the
-# window's outer screen rect (GetWindowRect) and its client rect
-# (GetClientRect) so a big gap between the two (title bar, borders, a
-# toolbar/ruler INSIDE the client area, etc.) is easy to spot. See the
-# ProbeHotkey handler in this file's hotkeyAction for how it's used.
-function Get-RelayWindowGeometry {
-    param([IntPtr]$Handle)
-    if ($Handle -eq [IntPtr]::Zero -or -not [Win32]::IsWindow($Handle)) { return $null }
-    $winRect = New-Object RECT
-    $cliRect = New-Object RECT
-    if (-not [Win32]::GetWindowRect($Handle, [ref]$winRect)) { return $null }
-    if (-not [Win32]::GetClientRect($Handle, [ref]$cliRect)) { return $null }
-    return [pscustomobject]@{
-        WindowLeft   = $winRect.Left
-        WindowTop    = $winRect.Top
-        WindowWidth  = $winRect.Right - $winRect.Left
-        WindowHeight = $winRect.Bottom - $winRect.Top
-        ClientWidth  = $cliRect.Right - $cliRect.Left
-        ClientHeight = $cliRect.Bottom - $cliRect.Top
-    }
-}
-
 Write-Host "AutoClipCapture is running." -ForegroundColor White
 Write-Host "  $ToggleDisplay  -> start/stop the capture loop" -ForegroundColor White
 Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $ExitDisplay  -> quit"
 Write-Host "  $F3Display  -> send a single F3 to the focused window"
-Write-Host "  $ProbeDisplay  -> DIAGNOSTIC: move the mouse (no click, no keys) to where Screen1Select would click for its topmost data row"
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     $m = $ModeHotkeyMap[$hkId]
     Write-Host "  $($m.Hotkey.Display)  -> mode: $($m.Name)  (action key: $($m.ActionKeyDisplay))" -ForegroundColor White
@@ -1449,13 +1306,14 @@ foreach ($hkId in $ModeHotkeyMap.Keys) {
 foreach ($hkId in $PipelineHotkeyMap.Keys) {
     $p = $PipelineHotkeyMap[$hkId]
     if ($null -ne $p.ComponentList -and [bool]$p.ComponentList.Enabled) {
-        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component list pre-pass -> component -> environment -> SQL search)" -ForegroundColor White
+        $selCfg = $p.Screen1Select
+        if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
+            Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (pages through the component list, rewinds to the top, writes a Markdown table - does not open/select anything)" -ForegroundColor White
+        } else {
+            Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (pages through the component list, writes a Markdown table - does not open/select anything)" -ForegroundColor White
+        }
     } else {
         Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
-    }
-    $selCfg = $p.Screen1Select
-    if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-        Write-Host "                    Screen1Select: row-selection needs no mouse click and no calibration - it's computed from a fixed $($selCfg.GridRows)x$($selCfg.GridCols) screen grid, input column $($selCfg.InputColumn), topmost data row $($selCfg.DataStartRow)." -ForegroundColor Yellow
     }
 }
 Write-Host "Action key: $ActionKeyDisplay"
@@ -1538,7 +1396,6 @@ $tickAction = {
             switch -Wildcard ($global:CR_PipelineState) {
                 'List*' { Invoke-PipelineListTick }
                 'Rewind*' { Invoke-PipelineScreen1SelectTick }
-                'Select*' { Invoke-PipelineScreen1SelectTick }
                 'Comp*' { Invoke-PipelineScreen1Tick }
                 'Env*'  { Invoke-PipelineScreen2Tick }
                 'Sql_*' { Invoke-PipelineScreen3Tick }
@@ -1896,53 +1753,6 @@ $hotkeyAction = {
         [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
         Write-Host "[AutoClipCapture] F3 sent to the focused window." -ForegroundColor Green
     }
-    elseif ($id -eq $ProbeHotkeyId) {
-        # ---- Diagnostic only: does NOT click or send any keystrokes.
-        # Click the terminal window to bring it to the foreground, then
-        # press this hotkey. It logs the window's outer/client
-        # geometry and moves the real mouse cursor (nothing else) to
-        # where Screen1Select would click for (DataStartRow,
-        # InputColumn) - i.e. the topmost visible row's selection
-        # field - so you can see exactly where the math thinks that is
-        # and compare it with where it actually is on screen. ----
-        if (-not (Test-RightModifierSatisfied -Modifiers $ProbeModifiers -RequireRight $ProbeRequireRightModifier)) { return }
-
-        $selCfg = $null
-        foreach ($p in $PipelineConfigs) {
-            if ($null -ne $p.Screen1Select -and [bool]$p.Screen1Select.Enabled) { $selCfg = $p.Screen1Select; break }
-        }
-        if ($null -eq $selCfg) {
-            Write-Host "[AutoClipCapture] Probe: no pipeline has Screen1Select enabled - nothing to compute." -ForegroundColor Yellow
-            return
-        }
-
-        $fgHandle = [Win32]::GetForegroundWindow()
-        if ($fgHandle -eq [IntPtr]::Zero) {
-            Write-Host "[AutoClipCapture] Probe: no foreground window." -ForegroundColor Red
-            return
-        }
-
-        $geo = Get-RelayWindowGeometry -Handle $fgHandle
-        if ($null -eq $geo) {
-            Write-Host "[AutoClipCapture] Probe: couldn't read that window's geometry." -ForegroundColor Red
-            return
-        }
-
-        $gridRows = [double]$selCfg.GridRows
-        $gridCols = [double]$selCfg.GridCols
-        $pixelsPerCol = [double]$geo.ClientWidth  / $gridCols
-        $pixelsPerRow = [double]$geo.ClientHeight / $gridRows
-        $clientX = [int][Math]::Round(([double]$selCfg.InputColumn  - 0.5) * $pixelsPerCol)
-        $clientY = [int][Math]::Round(([double]$selCfg.DataStartRow - 0.5) * $pixelsPerRow)
-
-        Write-Host "[AutoClipCapture] Probe: window rect $($geo.WindowWidth)x$($geo.WindowHeight) at ($($geo.WindowLeft), $($geo.WindowTop)); client rect $($geo.ClientWidth)x$($geo.ClientHeight)." -ForegroundColor Cyan
-        Write-Host "[AutoClipCapture] Probe: grid $($selCfg.GridRows)x$($selCfg.GridCols) -> $([Math]::Round($pixelsPerCol,2))px/col, $([Math]::Round($pixelsPerRow,2))px/row." -ForegroundColor Cyan
-        Write-Host "[AutoClipCapture] Probe: moving mouse to (row $($selCfg.DataStartRow), col $($selCfg.InputColumn)) = client ($clientX, $clientY). Compare this to the actual selection field." -ForegroundColor Cyan
-
-        if (-not (Move-RelayMouseTo -Handle $fgHandle -ClientX $clientX -ClientY $clientY)) {
-            Write-Host "[AutoClipCapture] Probe: couldn't move the mouse (window gone?)." -ForegroundColor Red
-        }
-    }
     elseif ($ModeHotkeyMap.ContainsKey($id)) {
         $mode = $ModeHotkeyMap[$id]
         if (-not (Test-RightModifierSatisfied -Modifiers ([int]$mode.Hotkey.Modifiers) -RequireRight ([bool]$mode.Hotkey.RequireRightModifier))) { return }
@@ -2075,19 +1885,18 @@ $hotkeyAction = {
                     return
                 }
                 $safeListName = Get-SafeFileName $listName
-                if (-not $safeListName.ToLower().EndsWith('.txt')) { $safeListName += '.txt' }
+                if (-not $safeListName.ToLower().EndsWith('.md')) { $safeListName += '.md' }
                 $listOutputPath = Join-Path $LogDir $safeListName
             }
 
-            # Screen1Select needs no click, no mouse position, and no
-            # calibration file at all - row/column click points are
-            # computed straight from the target window's current client
-            # size and the fixed screen grid in Screen1Select.GridRows/
-            # GridCols/InputColumn/DataStartRow. Just a confirmation
-            # here, nothing blocking.
+            # Row-selection has been removed from this pipeline - it
+            # only pages through the component list, optionally
+            # rewinds to the top (Screen1Select.Enabled), and writes a
+            # Markdown table. Just a confirmation here, nothing
+            # blocking.
             $selCfg = $pipeline.Screen1Select
             if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select: using a $($selCfg.GridRows)x$($selCfg.GridCols) grid, input column $($selCfg.InputColumn), topmost data row $($selCfg.DataStartRow) - no click or calibration needed." -ForegroundColor Cyan
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Will rewind to the top ($($selCfg.RewindActionDisplay)) once the list is complete." -ForegroundColor Cyan
             }
 
             Hide-RelayResultOverlay
@@ -2138,7 +1947,6 @@ $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $F3HotkeyId)     | Out-Null
-[HotkeyForm]::UnregisterHotKey($FormHandle, $ProbeHotkeyId)  | Out-Null
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
 }

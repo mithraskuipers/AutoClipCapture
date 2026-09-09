@@ -27,12 +27,6 @@
                      "Display":  "Alt+<",
                      "RequireRightModifier":  false
                  },
-    "ProbeHotkey":  {
-                     "Modifiers":  6,
-                     "Key":  73,
-                     "Display":  "Ctrl+Shift+I",
-                     "RequireRightModifier":  false
-                 },
     "ResultOverlayDurationMs":  4000,
     "Modes":  [
                   {
@@ -77,25 +71,14 @@
                                                 "SkipRowsEnd":  3,
                                                 "DupDetectThreshold":  0.995,
                                                 "MaxPages":  500,
-                                                "OutputFileName":  "pipeline_component_list.txt"
+                                                "OutputFileName":  "pipeline_component_list.md"
                                             },
                           "Screen1Select":  {
                                                 "Enabled":  true,
                                                 "RowPrefixText":  "COB",
-                                                "ActionKeyChar":  "B",
-                                                "ActionKeyEnterToken":  "{ENTER}",
-                                                "GridRows":  32,
-                                                "GridCols":  80,
-                                                "InputColumn":  3,
-                                                "DataStartRow":  7,
                                                 "RewindActionToken":  "{F7}",
                                                 "RewindActionDisplay":  "F7",
                                                 "MaxRewindPresses":  200,
-                                                "NextActionToken":  "{F8}",
-                                                "NextActionDisplay":  "F8",
-                                                "MaxSearchPagesPerItem":  500,
-                                                "BackActionToken":  "{F3}",
-                                                "BackActionDisplay":  "F3",
                                                 "StepDelayMs":  900,
                                                 "RewindStepDelayMs":  150
                                             },
