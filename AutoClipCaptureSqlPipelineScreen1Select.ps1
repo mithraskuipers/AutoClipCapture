@@ -31,11 +31,17 @@
         is RowPrefixText and whose *second token is exactly* the
         current id - a token-for-token comparison, never a substring
         search, so "KI001" can never match a row for "KI0011" or
-        "KI001A"
-          -> found -> click Screen1Select.ClickColumnOffset columns to
-             the side of that row's RowPrefixText (default -1, i.e.
-             one column to its left - the classic ISPF-style
-             prefix/selection field)
+        "KI001A". While scanning, every line that carries a
+        RowPrefixText token at all (matched id or not) is counted, in
+        on-screen order, as one of this page's visible data rows - so
+        the matched row's 0-based position in that count (its
+        "DataRowIndex") is known as soon as it's found: 0 for the
+        topmost visible data row, 1 for the next one down, etc.
+          -> found -> click the row's selection field: physical
+             screen row (Screen1Select.DataStartRow + DataRowIndex),
+             column Screen1Select.InputColumn - see "Fixed-grid
+             click positioning" below for why this never needs
+             calibration
              -> Select_ClickWait: clear the primary command line
                 (in case a previous attempt's action key ended up
                 there instead of in a row's prefix field - see the
@@ -44,10 +50,10 @@
                 *without* pressing Enter yet
              -> Select_TypeWait -> Select_VerifyPlacementCopy: copy
                 the screen again and check, BEFORE pressing Enter:
-                  a) the action key character actually landed exactly
-                     Screen1Select.ClickColumnOffset columns to the
-                     side of the target row's RowPrefixText - i.e. is
-                     really sitting in that row's prefix field - and
+                  a) the action key character actually landed in
+                     column Screen1Select.InputColumn of the target
+                     row's text - i.e. is really sitting in that
+                     row's prefix field - and
                   b) Screen1Select.CommandPromptText (default
                      "Command ===>") is NOT immediately followed by
                      the action key character anywhere on the page -
@@ -93,33 +99,52 @@
  faster Screen1Select.RewindStepDelayMs (default 300ms) instead. Falls
  back to StepDelayMs if RewindStepDelayMs isn't set in the config.
 
- ---- Mouse-click calibration ----
- Every click is computed as a plain grid formula, in CLIENT-relative
- pixels (i.e. relative to the target window's own client area):
+ ---- Fixed-grid click positioning (no calibration) ----
+ The target application is a fixed-size character-cell terminal -
+ Screen1Select.GridRows x Screen1Select.GridCols (32x80 for a classic
+ 3270 model 2 screen) - and every selection field this phase ever
+ clicks sits at a screen position that's constant no matter which
+ page of the list is on screen: column Screen1Select.InputColumn,
+ starting at row Screen1Select.DataStartRow for the topmost visible
+ data row and incrementing by one row per data row down the page.
+ That means the click point can be computed directly from the target
+ window's current client-area pixel size, with no mouse-driven
+ calibration step, no saved per-monitor state, and nothing that can
+ go stale when the window moves or gets resized:
 
-     ClientX = Screen1Select.OriginX + Column * Screen1Select.CharWidthPx
-     ClientY = Screen1Select.OriginY + Row    * Screen1Select.CharHeightPx
+     PixelsPerCol = ClientWidth  / Screen1Select.GridCols
+     PixelsPerRow = ClientHeight / Screen1Select.GridRows
+     ClientX = (Screen1Select.InputColumn                    - 0.5) * PixelsPerCol
+     ClientY = (Screen1Select.DataStartRow + DataRowIndex     - 0.5) * PixelsPerRow
 
- ...where Row/Column are 0-based positions *within the raw clipboard
- text* (Row = which line, Column = character offset into that line),
- and OriginX/OriginY are the pixel position of ROW 0 / COLUMN 0 of
- that same text - not the position of any particular row.
+ (the -0.5 aims for the center of the target character cell rather
+ than its top-left corner). See Get-PipelinePageClickPoint below -
+ this is the same formula, and the same Get-RelayClientSize helper,
+ that AutoClipCapture.ps1's Ctrl+Shift+I Probe hotkey uses to move the
+ mouse (no click, no keys) to exactly where DataStartRow/InputColumn
+ says the topmost row's field is, so that placement can be sanity-
+ checked by eye against the real screen before ever running the
+ pipeline for real.
 
- There's no separate calibration script/session for this anymore.
- Instead, AutoClipCapture.ps1's startup banner tells the user, for
- every pipeline with Screen1Select enabled: click the terminal with
- the mouse Screen1Select.ClickColumnOffset column(s) to the side of
- the TOPMOST visible RowPrefixText row before pressing that pipeline's
- hotkey. Set-Screen1SelectCalibrationFromMouse (below) then reads
- wherever the mouse happens to be right at that moment, copies the
- screen the user is looking at to find the real (Row, Col) of that
- topmost row, measures the window's client pixel size, and back-solves
- OriginX/OriginY/CharWidthPx/CharHeightPx from those two things - no
- dialog, nothing else needed from the user. If it can't find a
- RowPrefixText row on the currently-visible screen (i.e. the user
- hadn't actually navigated/clicked there yet), it says so in the
- console and the pipeline doesn't start - just click the right spot
- and press the hotkey again.
+ An earlier version of this phase instead used a one-time,
+ mouse-position-based calibration (clicking on-screen next to a
+ visible row, deriving a per-pixel origin/character-size from that,
+ and later locating each row's *column* by searching the copied text
+ for where "COB" happened to start rather than using a fixed column).
+ That approach was replaced because it re-derived the row/column from
+ whatever the copied clipboard text looked like on a given page - and
+ the exact shape of that text (how many header/blank lines precede
+ the data, and exactly where a token starts once whitespace has been
+ copied) isn't reliably identical across every capture, which is what
+ let the action key land one or more rows/columns off the real
+ selection field (e.g. character corrupted mid-value instead of the
+ intended lonely "B" - the actual mainframe screen then reports
+ something like an "invalid placement"/misplaced-command error
+ instead of opening screen 2). Fixed grid math sidesteps that
+ entirely: InputColumn and DataStartRow are properties of the host
+ application's screen layout, not of any one capture, so they're
+ always right regardless of how the copied text happens to be
+ shaped.
 
  ---- Placement verification ----
  Because a click landing even one row or column off can end up typing
@@ -136,9 +161,9 @@
  ($global:CR_* pipeline state, $TimerTickMs / $CopyDelayMs, $LogDir,
  Set-RelayForeground, Set-RelayStatus, Test-RelayTextContains,
  Update-PipelineScreenTracking, Show-RelayResultOverlay,
- Invoke-RelayMouseClick, Stop-PipelineCapture) - all in scope here
- because this file is dot-sourced directly into that script, not run
- standalone.
+ Invoke-RelayMouseClick, Get-RelayClientSize, Stop-PipelineCapture) -
+ all in scope here because this file is dot-sourced directly into
+ that script, not run standalone.
 =====================================================================
 #>
 
@@ -169,12 +194,17 @@ function Get-PipelineComponentIdsFromListFile {
 
 # Searches raw (unfiltered) captured text line-by-line for a row whose
 # first whitespace token is RowPrefixText and whose second token is
-# *exactly* TargetId - never a substring/Contains match. Returns
-# $null when nothing matches, otherwise an object with the 0-based
-# line index and the character column RowPrefixText starts at on that
-# line (both needed for the click-point math, and both measured
-# against the raw text so they line up with the real on-screen grid -
-# filtering/trimming would shift them).
+# *exactly* TargetId - never a substring/Contains match. While
+# scanning, every line carrying a RowPrefixText token at all (whether
+# or not it turns out to be the one being searched for) counts as one
+# of this page's visible data rows, in on-screen top-to-bottom order -
+# so a match, if found, comes back with its DataRowIndex: its 0-based
+# position among those rows (0 = topmost visible data row, 1 = the
+# next one down, ...). That index is exactly what
+# Get-PipelinePageClickPoint needs to turn Screen1Select.DataStartRow
+# into the physical row this specific match sits on - see "Fixed-grid
+# click positioning" in the header comment above. Returns $null when
+# nothing matches.
 function Find-PipelineComponentRow {
     param(
         [string]$Text,
@@ -184,178 +214,75 @@ function Find-PipelineComponentRow {
     if ([string]::IsNullOrEmpty($Text)) { return $null }
 
     $lines = $Text -split "`r`n|`r|`n"
+    $dataRowCounter = 0
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         $trimmed = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
         $tokens = $trimmed -split '\s+'
-        # RowPrefixText doesn't have to be the very first token - once
-        # the action key has been typed into the prefix field, the
-        # field's own leftover character(s) (e.g. a permanent "_"
-        # placeholder before the editable position) glue together with
-        # the typed key into their own token, pushing RowPrefixText to
-        # the second token position. So this scans every token
-        # position for RowPrefixText immediately followed by TargetId,
-        # not just position 0 - matches both before and after typing.
+
+        # Is this line one of the page's data rows at all - i.e. does
+        # RowPrefixText appear as a token anywhere on it? (Not
+        # necessarily the first token - once the action key has been
+        # typed into the prefix field, the field's own leftover
+        # character(s), e.g. a permanent "_" placeholder before the
+        # editable position, can glue together with the typed key
+        # into their own token, pushing RowPrefixText to the second
+        # token position. Checking every token position, not just
+        # position 0, matches both before and after typing, and keeps
+        # the data-row count consistent either way.)
+        $isDataRow = $false
+        foreach ($tok in $tokens) {
+            if ($tok -eq $RowPrefixText) { $isDataRow = $true; break }
+        }
+        if (-not $isDataRow) { continue }
+
+        $thisDataRowIndex = $dataRowCounter
+        $dataRowCounter++
+
         for ($t = 0; $t -lt ($tokens.Count - 1); $t++) {
             if ($tokens[$t] -eq $RowPrefixText -and $tokens[$t + 1] -eq $TargetId) {
                 $col = $line.IndexOf($RowPrefixText, [StringComparison]::OrdinalIgnoreCase)
                 if ($col -lt 0) { $col = 0 }
-                return [pscustomobject]@{ Row = $i; Col = $col }
+                return [pscustomobject]@{ Row = $i; Col = $col; DataRowIndex = $thisDataRowIndex }
             }
         }
     }
     return $null
 }
 
-# Computes the CLIENT-relative pixel point for a 0-based (Row, Col)
-# text position, using the Screen1Select calibration fields. See the
-# header comment above for what these mean and how to measure them.
-function Get-PipelineGridClickPoint {
-    param([int]$Row, [int]$Col, $SelectCfg)
-    $x = [double]$SelectCfg.OriginX + ($Col * [double]$SelectCfg.CharWidthPx)
-    $y = [double]$SelectCfg.OriginY + ($Row * [double]$SelectCfg.CharHeightPx)
+# Turns a row's DataRowIndex (see Find-PipelineComponentRow above)
+# into a CLIENT-relative pixel point to click, using nothing but the
+# target window's current client-area pixel size and the fixed
+# Screen1Select.GridRows/GridCols/InputColumn/DataStartRow grid - see
+# "Fixed-grid click positioning" in the header comment above for the
+# formula and why no calibration step is needed. This is the same
+# formula (and the same Get-RelayClientSize helper, defined in
+# AutoClipCapture.ps1) that the Ctrl+Shift+I Probe hotkey uses for its
+# topmost-row preview, so Probe can always be used to sanity-check
+# these coordinates by eye before trusting them in a live run. Falls
+# back to the classic 32x80 3270 grid if GridRows/GridCols aren't set
+# in the config. Returns $null if the target window's client size
+# can't be read (e.g. the window is gone).
+function Get-PipelinePageClickPoint {
+    param([int]$DataRowIndex, $SelectCfg, [IntPtr]$Handle)
+
+    $size = Get-RelayClientSize -Handle $Handle
+    if ($null -eq $size) { return $null }
+
+    $gridRows = if ($SelectCfg.PSObject.Properties.Name -contains 'GridRows' -and $SelectCfg.GridRows) { [double]$SelectCfg.GridRows } else { 32.0 }
+    $gridCols = if ($SelectCfg.PSObject.Properties.Name -contains 'GridCols' -and $SelectCfg.GridCols) { [double]$SelectCfg.GridCols } else { 80.0 }
+
+    $pixelsPerCol = [double]$size.Width  / $gridCols
+    $pixelsPerRow = [double]$size.Height / $gridRows
+
+    $row = [double]$SelectCfg.DataStartRow + $DataRowIndex
+    $col = [double]$SelectCfg.InputColumn
+
+    $x = ($col - 0.5) * $pixelsPerCol
+    $y = ($row - 0.5) * $pixelsPerRow
+
     return New-Object System.Drawing.Point([int][Math]::Round($x), [int][Math]::Round($y))
-}
-
-# Same raw-text scan as Find-PipelineComponentRow above, but matches
-# on RowPrefixText alone (no target id) - used by the mouse-based
-# calibration below to find the topmost visible row, whatever id it
-# has.
-function Find-PipelineFirstRowWithPrefix {
-    param(
-        [string]$Text,
-        [string]$RowPrefixText
-    )
-    if ([string]::IsNullOrEmpty($Text)) { return $null }
-
-    $lines = $Text -split "`r`n|`r|`n"
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-        $tokens = $trimmed -split '\s+'
-        foreach ($tok in $tokens) {
-            if ($tok -eq $RowPrefixText) {
-                $col = $line.IndexOf($RowPrefixText, [StringComparison]::OrdinalIgnoreCase)
-                if ($col -lt 0) { $col = 0 }
-                return [pscustomobject]@{ Row = $i; Col = $col }
-            }
-        }
-    }
-    return $null
-}
-
-# ---------------------------------------------------------------------
-# Set-Screen1SelectCalibrationFromMouse
-#
-# No dialog, nothing interactive - just reads wherever the mouse
-# currently is (the user was told, in the startup banner, to click
-# there before pressing this pipeline's hotkey) and derives
-# OriginX/OriginY/CharWidthPx/CharHeightPx from it:
-#
-#   1. Copies the screen the user is looking at right now and finds
-#      the real (Row, Col) of the topmost RowPrefixText row in the raw
-#      clipboard text - using the exact same parsing
-#      (Find-PipelineFirstRowWithPrefix, built the same way as
-#      Find-PipelineComponentRow) that the live row search uses at
-#      runtime, so calibration and matching can never drift apart.
-#   2. Reads the window's client pixel size and divides by the
-#      terminal's fixed 80x32 character grid to get
-#      CharWidthPx/CharHeightPx.
-#   3. Back-solves OriginX/OriginY so the grid formula
-#         ClientX = OriginX + Col * CharWidthPx
-#         ClientY = OriginY + Row * CharHeightPx
-#      reproduces exactly where the mouse is right now for that
-#      measured (Row, Col).
-#   4. Saves the result into this pipeline's Screen1Select block and
-#      persists AutoClipCaptureConfig.json (after backing up the old
-#      one), then returns $true so the pipeline can start immediately.
-#
-# Returns $false (nothing changed, nothing clicked/typed) if the
-# target window can't be measured, or no RowPrefixText row is visible
-# right now to measure against - in which case the user just needs to
-# click the right spot and press the hotkey again.
-# ---------------------------------------------------------------------
-function Set-Screen1SelectCalibrationFromMouse {
-    param($Pipeline, [IntPtr]$Handle)
-
-    $selCfg = $Pipeline.Screen1Select
-    $offset = [int]$selCfg.ClickColumnOffset
-
-    # Grab the cursor position immediately - nothing between here and
-    # using it should move the real mouse pointer.
-    $cursorScreenPos = [System.Windows.Forms.Cursor]::Position
-
-    if (-not (Set-RelayForeground -Handle $Handle)) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Target window is gone - start cancelled." -ForegroundColor Red
-        return $false
-    }
-
-    [System.Windows.Forms.SendKeys]::SendWait('^c')
-    Start-Sleep -Milliseconds 300
-
-    $text = ''
-    try {
-        if ([System.Windows.Forms.Clipboard]::ContainsText()) {
-            $text = [System.Windows.Forms.Clipboard]::GetText()
-        }
-    } catch {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
-    }
-
-    $found = Find-PipelineFirstRowWithPrefix -Text $text -RowPrefixText $selCfg.RowPrefixText
-    if ($null -eq $found) {
-        $sideCount = [Math]::Abs($offset)
-        $side = if ($offset -lt 0) { "left" } else { "right" }
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Start cancelled - no '$($selCfg.RowPrefixText)' row visible on the current screen." -ForegroundColor Red
-        Write-Host "  Click the terminal $sideCount character(s) to the $side of the TOPMOST visible '$($selCfg.RowPrefixText)' row, then press this pipeline's hotkey again." -ForegroundColor Yellow
-        return $false
-    }
-
-    $clientPt = New-Object System.Drawing.Point($cursorScreenPos.X, $cursorScreenPos.Y)
-    if (-not [Win32]::ScreenToClient($Handle, [ref]$clientPt)) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Couldn't convert the mouse position - start cancelled." -ForegroundColor Red
-        return $false
-    }
-
-    $rect = New-Object RECT
-    if (-not [Win32]::GetClientRect($Handle, [ref]$rect)) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Couldn't read the target window's size - start cancelled." -ForegroundColor Red
-        return $false
-    }
-    $clientW = $rect.Right - $rect.Left
-    $clientH = $rect.Bottom - $rect.Top
-    if ($clientW -le 0 -or $clientH -le 0) {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Target window has no usable size - start cancelled." -ForegroundColor Red
-        return $false
-    }
-
-    $cols = 80
-    $rows = 32
-    $charWidthPx  = $clientW / $cols
-    $charHeightPx = $clientH / $rows
-
-    $clickCol = $found.Col + $offset
-
-    $originX = $clientPt.X - ($clickCol  * $charWidthPx)
-    $originY = $clientPt.Y - ($found.Row * $charHeightPx)
-
-    $selCfg.OriginX      = [math]::Round($originX, 2)
-    $selCfg.OriginY      = [math]::Round($originY, 2)
-    $selCfg.CharWidthPx  = [math]::Round($charWidthPx, 2)
-    $selCfg.CharHeightPx = [math]::Round($charHeightPx, 2)
-
-    try {
-        $backupPath = Join-Path $PSScriptRoot ("AutoClipCaptureConfig.backup-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-        if (Test-Path $ConfigPath) { Copy-Item -Path $ConfigPath -Destination $backupPath -Force }
-        $Config | ConvertTo-Json -Depth 20 | Set-Content -Path $ConfigPath -Encoding UTF8
-    } catch {
-        Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Calibrated for this run, but saving to config failed: $_" -ForegroundColor Yellow
-    }
-
-    Write-Host "[AutoClipCapture] [$($Pipeline.Name)] Calibrated from mouse position - OriginX=$($selCfg.OriginX) OriginY=$($selCfg.OriginY) CharWidthPx=$($selCfg.CharWidthPx) CharHeightPx=$($selCfg.CharHeightPx)." -ForegroundColor Green
-    return $true
 }
 
 # ---------------------------------------------------------------------
@@ -365,13 +292,16 @@ function Set-Screen1SelectCalibrationFromMouse {
 # Enter is pressed. Copies the screen (the caller passes in that raw
 # text) and checks two things:
 #
-#   a) The character actually sitting Screen1Select.ClickColumnOffset
-#      column(s) to the side of TargetId's RowPrefixText really is
-#      ActionKeyChar - i.e. it landed in that row's prefix field, and
-#      nowhere else. Re-finds the row fresh (same parsing as the live
-#      search) rather than trusting the row/column found earlier, so
-#      this check can't be fooled by anything that shifted between the
-#      click and now.
+#   a) The character actually sitting at Screen1Select.InputColumn on
+#      TargetId's row really is ActionKeyChar - i.e. it landed in
+#      that row's prefix field, and nowhere else. InputColumn is a
+#      fixed property of the host screen's layout (see "Fixed-grid
+#      click positioning" above), not something derived from where
+#      RowPrefixText's own text happens to start, so this check can't
+#      drift the way the old text-relative version could. Re-finds
+#      the row fresh (same parsing as the live search) rather than
+#      trusting the row found earlier, so this check can't be fooled
+#      by anything that shifted between the click and now.
 #   b) CommandPromptText (default "Command ===>") is NOT immediately
 #      followed by ActionKeyChar anywhere in the text - that pattern
 #      only appears when the character landed in the terminal's
@@ -387,7 +317,6 @@ function Test-Screen1SelectPlacement {
         $SelectCfg
     )
 
-    $offset = [int]$SelectCfg.ClickColumnOffset
     $actionChar = [string]$SelectCfg.ActionKeyChar
     $cmdPromptText = if ($SelectCfg.PSObject.Properties.Name -contains 'CommandPromptText' -and $SelectCfg.CommandPromptText) {
         [string]$SelectCfg.CommandPromptText
@@ -407,13 +336,17 @@ function Test-Screen1SelectPlacement {
         return [pscustomobject]@{ Ok = $false; Reason = "row for '$TargetId' isn't on screen anymore"; Row = -1; Col = -1 }
     }
 
-    $expectedCol = $found.Col + $offset
+    # The prefix field sits at the fixed Screen1Select.InputColumn on
+    # every row (1-based, matching the mainframe's own row/col
+    # display), never relative to wherever RowPrefixText's own text
+    # happens to start.
+    $expectedCol = [int]$SelectCfg.InputColumn - 1
     $lines = $Text -split "`r`n|`r|`n"
     $line = $lines[$found.Row]
     $actualChar = if ($expectedCol -ge 0 -and $expectedCol -lt $line.Length) { $line.Substring($expectedCol, 1) } else { '' }
 
     if ($actualChar -ne $actionChar) {
-        return [pscustomobject]@{ Ok = $false; Reason = "expected '$actionChar' $([Math]::Abs($offset)) column(s) from '$($SelectCfg.RowPrefixText)' on row $($found.Row), found '$actualChar' instead"; Row = $found.Row; Col = $expectedCol }
+        return [pscustomobject]@{ Ok = $false; Reason = "expected '$actionChar' at column $($SelectCfg.InputColumn) on row $($found.Row), found '$actualChar' instead"; Row = $found.Row; Col = $expectedCol }
     }
 
     return [pscustomobject]@{ Ok = $true; Reason = 'placement verified'; Row = $found.Row; Col = $expectedCol }
@@ -611,9 +544,14 @@ function Invoke-PipelineScreen1SelectTick {
 
             $found = Find-PipelineComponentRow -Text $text -RowPrefixText $selCfg.RowPrefixText -TargetId $targetId
             if ($null -ne $found) {
-                $clickCol = $found.Col + [int]$selCfg.ClickColumnOffset
-                $pt = Get-PipelineGridClickPoint -Row $found.Row -Col $clickCol -SelectCfg $selCfg
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: found '$targetId' at row $($found.Row) - clicking (row $($found.Row), col $clickCol)." -ForegroundColor DarkCyan
+                $physRow = [int]$selCfg.DataStartRow + $found.DataRowIndex
+                $pt = Get-PipelinePageClickPoint -DataRowIndex $found.DataRowIndex -SelectCfg $selCfg -Handle $global:CR_TargetHandle
+                if ($null -eq $pt) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Select: found '$targetId' as visible data row $($found.DataRowIndex) - clicking (screen row $physRow, col $($selCfg.InputColumn)) = client ($($pt.X), $($pt.Y))." -ForegroundColor DarkCyan
                 if (-not (Invoke-RelayMouseClick -Handle $global:CR_TargetHandle -ClientX $pt.X -ClientY $pt.Y)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
