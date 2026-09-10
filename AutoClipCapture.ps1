@@ -140,9 +140,16 @@
                        the one before it (ComponentList.DupDetectThreshold,
                        same comparison the duplicate-capture protection
                        below uses), which means paging further isn't
-                       revealing anything new. That saved list is then
-                       available for later use; this phase's job ends
-                       once the list is captured.
+                       revealing anything new. It also stops right away,
+                       without waiting for that repeat-page check and
+                       without pressing the next-page key at all, the
+                       moment a page's raw captured text contains
+                       ComponentList.EndOfListText (default "Bottom of
+                       List") - an explicit "you're already at the
+                       end" marker some screens show on their last
+                       page. That saved list is then available for
+                       later use; this phase's job ends once the list
+                       is captured.
 
  Duplicate-capture protection: each capture is compared to the one
  immediately before it. If they come back 99.5% identical (default;
@@ -188,7 +195,6 @@ $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen2.ps1")
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen3.ps1")
 . (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineComponentList.ps1")
-. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen1Select.ps1")
 
 function Get-DefaultConfig {
     [pscustomobject]@{
@@ -373,7 +379,8 @@ function Add-PipelineComponentListDefaults {
         SkipRowsEnd        = 3
         DupDetectThreshold = 0.995
         MaxPages           = 500
-        OutputFileName     = 'pipeline_component_list.md'
+        OutputFileName     = 'pipeline_component_list.txt'
+        EndOfListText      = 'Bottom of List'
     }
 
     if (-not ($Pipeline.PSObject.Properties.Name -contains 'ComponentList') -or $null -eq $Pipeline.ComponentList) {
@@ -1256,10 +1263,6 @@ function Stop-PipelineCapture {
     $global:CR_PipelineListPageIdx      = 0
     $global:CR_PipelineListPrevFiltered = $null
     $global:CR_PipelineListOutputPath   = $null
-    $global:CR_PipelineRewindPrevText    = $null
-    $global:CR_PipelineRewindPresses     = 0
-    $global:CR_PipelineComponentList     = @()
-    $global:CR_PipelineSelectSearchPages = 0
     $global:CR_TargetHandle          = [IntPtr]::Zero
     Hide-RelayStatus
 }
@@ -1306,12 +1309,7 @@ foreach ($hkId in $ModeHotkeyMap.Keys) {
 foreach ($hkId in $PipelineHotkeyMap.Keys) {
     $p = $PipelineHotkeyMap[$hkId]
     if ($null -ne $p.ComponentList -and [bool]$p.ComponentList.Enabled) {
-        $selCfg = $p.Screen1Select
-        if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-            Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (pages through the component list, rewinds to the top, writes a Markdown table - does not open/select anything)" -ForegroundColor White
-        } else {
-            Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (pages through the component list, writes a Markdown table - does not open/select anything)" -ForegroundColor White
-        }
+        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component list pre-pass -> component -> environment -> SQL search)" -ForegroundColor White
     } else {
         Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
     }
@@ -1367,13 +1365,6 @@ $global:CR_PipelineListPageIdx      = 0     # how many pages have been saved so 
 $global:CR_PipelineListPrevFiltered = $null # previous page's filtered text, for end-of-list comparison
 $global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_component_list.txt for this run
 
-# ---- Rewind + Select state (see AutoClipCaptureSqlPipelineScreen1Select.ps1) ----
-$global:CR_PipelineRewindPrevText    = $null # previous page's raw text while pressing F7, for "stopped changing = at the top" detection
-$global:CR_PipelineRewindPresses     = 0     # safety counter so a page that never stops changing can't loop forever
-$global:CR_PipelineComponentList     = @()   # component ids parsed out of the saved list file, in file order
-$global:CR_PipelineSelectSearchPages = 0     # how many times F8 has been pressed hunting for the *current* id
-$global:CR_PipelineSelectFoundRow    = $null # 0-based text-line index of the row currently being selected, saved for the pre-Enter placement check
-
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
 
@@ -1395,7 +1386,6 @@ $tickAction = {
 
             switch -Wildcard ($global:CR_PipelineState) {
                 'List*' { Invoke-PipelineListTick }
-                'Rewind*' { Invoke-PipelineScreen1SelectTick }
                 'Comp*' { Invoke-PipelineScreen1Tick }
                 'Env*'  { Invoke-PipelineScreen2Tick }
                 'Sql_*' { Invoke-PipelineScreen3Tick }
@@ -1869,36 +1859,6 @@ $hotkeyAction = {
 
             $useComponentList = ($null -ne $pipeline.ComponentList) -and [bool]$pipeline.ComponentList.Enabled
 
-            # When this pipeline's component-list pre-pass is enabled,
-            # ask for the output filename now (same prompt/validation
-            # as the classic Toggle relay's Show-FilenamePrompt), rather
-            # than always writing to the fixed name from config. The
-            # configured OutputFileName is still used as the suggested
-            # default text in the box.
-            $listOutputPath = $null
-            if ($useComponentList) {
-                $defaultListBase = [System.IO.Path]::GetFileNameWithoutExtension($pipeline.ComponentList.OutputFileName)
-                $listName = Show-FilenamePrompt -DefaultName $defaultListBase -TargetTitle $target.Title
-                if ($null -eq $listName) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled (no filename entered)." -ForegroundColor Yellow
-                    Hide-RelayStatus
-                    return
-                }
-                $safeListName = Get-SafeFileName $listName
-                if (-not $safeListName.ToLower().EndsWith('.md')) { $safeListName += '.md' }
-                $listOutputPath = Join-Path $LogDir $safeListName
-            }
-
-            # Row-selection has been removed from this pipeline - it
-            # only pages through the component list, optionally
-            # rewinds to the top (Screen1Select.Enabled), and writes a
-            # Markdown table. Just a confirmation here, nothing
-            # blocking.
-            $selCfg = $pipeline.Screen1Select
-            if ($null -ne $selCfg -and [bool]$selCfg.Enabled) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Will rewind to the top ($($selCfg.RewindActionDisplay)) once the list is complete." -ForegroundColor Cyan
-            }
-
             Hide-RelayResultOverlay
             $global:CR_TargetHandle             = $target.Handle
             $global:CR_TargetTitle              = $target.Title
@@ -1915,12 +1875,7 @@ $hotkeyAction = {
             $global:CR_PipelineCurrentScreen    = 0
             $global:CR_PipelineListPageIdx      = 0
             $global:CR_PipelineListPrevFiltered = $null
-            $global:CR_PipelineListOutputPath   = $listOutputPath
-            $global:CR_PipelineRewindPrevText   = $null
-            $global:CR_PipelineRewindPresses    = 0
-            $global:CR_PipelineComponentList    = @()
-            $global:CR_PipelineSelectFoundRow   = $null
-            $global:CR_PipelineSelectSearchPages = 0
+            $global:CR_PipelineListOutputPath   = if ($useComponentList) { Join-Path $LogDir $pipeline.ComponentList.OutputFileName } else { $null }
 
             $timer.Stop()
             $timer.Start()
