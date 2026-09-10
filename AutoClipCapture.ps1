@@ -16,17 +16,21 @@
                             a Yes/No confirmation box shows its title.
                             Press Enter (or click Yes) to accept it,
                             or No to click a different window.
-                         3. You are asked for a filename - that
-                            becomes the .txt file the clipboard data
-                            gets appended to for this session.
-                            Cancelling this prompt cancels the start
-                            (nothing runs).
+                         3. You are asked for a filename - that becomes
+                            the base name for this session's output.
+                            Whatever's typed (extension or not) is only
+                            ever used as a base name: the clipboard
+                            data gets appended to TWO files every time,
+                            a .txt copy under LogDir\txt and a .cbl
+                            copy under LogDir\cbl, both with identical
+                            content. Cancelling this prompt cancels the
+                            start (nothing runs).
                        Once running, it repeatedly:
                          1. Brings the selected window to the
                             foreground and sends it CTRL+C
                          2. Waits briefly for the clipboard to update
-                         3. Appends the clipboard text to the chosen
-                            file
+                         3. Appends the clipboard text to both the .txt
+                            and .cbl files for this session
                          4. Brings the selected window to the
                             foreground again and sends the configured
                             ACTION KEY (default F8)
@@ -261,6 +265,23 @@ if (-not [System.IO.Path]::IsPathRooted($DefaultLogFile)) {
 }
 $LogDir             = Split-Path -Path $DefaultLogFile -Parent
 $DefaultBaseName    = [System.IO.Path]::GetFileNameWithoutExtension($DefaultLogFile)
+
+# The classic Toggle relay (Ctrl+Shift+P) always saves two copies of
+# whatever it captures - a .txt copy under LogDir\txt and a .cbl copy
+# under LogDir\cbl - regardless of what extension (if any) the person
+# types into the filename prompt. Created up front so they exist even
+# before the first capture starts.
+$TxtDir = Join-Path $LogDir "txt"
+$CblDir = Join-Path $LogDir "cbl"
+foreach ($d in @($TxtDir, $CblDir)) {
+    if (-not (Test-Path -Path $d)) {
+        try {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+        } catch {
+            Write-Host "Could not create '$d': $_" -ForegroundColor Yellow
+        }
+    }
+}
 
 $CopyDelayMs = [int]$Config.CopyDelayMs
 $TimerTickMs = [int]$Config.TimerTickMs
@@ -675,7 +696,7 @@ function Show-FilenamePrompt {
     $lblTarget.Font = New-Object System.Drawing.Font($lblTarget.Font, [System.Drawing.FontStyle]::Italic)
 
     $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "Enter a filename for this capture (no extension needed):"
+    $lbl.Text = "Enter a filename for this capture (saved as .txt and .cbl):"
     $lbl.Location = New-Object System.Drawing.Point(15, 38)
     $lbl.Size = New-Object System.Drawing.Size(340, 20)
 
@@ -1331,7 +1352,8 @@ $global:CR_Running      = $false
 $global:CR_Selecting    = $false
 $global:CR_State        = 'Idle'   # Idle -> PostCopy -> PostAction -> Idle ...
 $global:CR_ElapsedMs    = 0
-$global:CR_LogFile      = $DefaultLogFile
+$global:CR_LogFile      = Join-Path $TxtDir ($DefaultBaseName + ".txt")
+$global:CR_LogFileCbl   = Join-Path $CblDir ($DefaultBaseName + ".cbl")
 $global:CR_TargetHandle = [IntPtr]::Zero
 $global:CR_TargetTitle  = ''
 $global:CR_PrevCaptureText     = $null
@@ -1610,7 +1632,16 @@ $tickAction = {
                             if (-not $stopRequested) {
                                 $filtered = Get-FilteredCaptureText -Text $text -SkipStart $SkipRowsStart -SkipEnd $SkipRowsEnd
                                 if (-not [string]::IsNullOrEmpty($filtered)) {
-                                    Add-Content -Path $global:CR_LogFile -Value $filtered
+                                    try {
+                                        Add-Content -Path $global:CR_LogFile -Value $filtered
+                                    } catch {
+                                        Write-Host "[AutoClipCapture] Failed to write to $($global:CR_LogFile): $_" -ForegroundColor Red
+                                    }
+                                    try {
+                                        Add-Content -Path $global:CR_LogFileCbl -Value $filtered
+                                    } catch {
+                                        Write-Host "[AutoClipCapture] Failed to write to $($global:CR_LogFileCbl): $_" -ForegroundColor Red
+                                    }
                                 }
                             }
                         }
@@ -1690,7 +1721,11 @@ $hotkeyAction = {
             }
 
             # 2. Ask for the filename, same as before, then start
-            #    right away once Enter is pressed.
+            #    right away once Enter is pressed. Whatever name (and
+            #    whatever extension, if any) is typed here only
+            #    supplies the base name - the actual output is always
+            #    two files: <base>.txt under LogDir\txt and
+            #    <base>.cbl under LogDir\cbl.
             $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
             if ($null -eq $name) {
                 Write-Host "[AutoClipCapture] Capture start cancelled." -ForegroundColor Yellow
@@ -1698,9 +1733,19 @@ $hotkeyAction = {
                 return
             }
             $safeName = Get-SafeFileName $name
-            if (-not $safeName.ToLower().EndsWith('.txt')) { $safeName += '.txt' }
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($safeName)
+            if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = $DefaultBaseName }
 
-            $global:CR_LogFile      = Join-Path $LogDir $safeName
+            foreach ($d in @($TxtDir, $CblDir)) {
+                if (-not (Test-Path -Path $d)) {
+                    try { New-Item -ItemType Directory -Path $d -Force | Out-Null } catch {
+                        Write-Host "[AutoClipCapture] Could not create '$d': $_" -ForegroundColor Yellow
+                    }
+                }
+            }
+
+            $global:CR_LogFile      = Join-Path $TxtDir ($baseName + ".txt")
+            $global:CR_LogFileCbl   = Join-Path $CblDir ($baseName + ".cbl")
             $global:CR_TargetHandle = $target.Handle
             $global:CR_TargetTitle  = $target.Title
             $global:CR_Running      = $true
@@ -1719,6 +1764,7 @@ $hotkeyAction = {
             $timer.Start()
 
             Write-Host "[AutoClipCapture] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
+            Write-Host "[AutoClipCapture] Capture STARTED -> $($global:CR_LogFileCbl)" -ForegroundColor Green
             Write-Host "[AutoClipCapture] Target window -> $($target.Title)" -ForegroundColor Green
             Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)
         } finally {
