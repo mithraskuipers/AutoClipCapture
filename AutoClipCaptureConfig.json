@@ -63,7 +63,7 @@
                                      },
                           "UseFocusedWindow":  true,
                           "ComponentList":  {
-                                                "Enabled":  true,
+                                                "Enabled":  false,
                                                 "NextActionToken":  "{F8}",
                                                 "NextActionDisplay":  "F8",
                                                 "SkipRowsStart":  5,
@@ -72,6 +72,23 @@
                                                 "MaxPages":  500,
                                                 "OutputFileName":  "pipeline_component_list.txt",
                                                 "EndOfListText":  "Bottom of List"
+                                            },
+                          "Screen1Select":  {
+                                                "OriginX":  0,
+                                                "OriginY":  0,
+                                                "CharWidthPx":  0,
+                                                "CharHeightPx":  0,
+                                                "ClickColumnOffset":  -2,
+                                                "SelectionText":  "B",
+                                                "RowsPerPage":  25,
+                                                "PageNextToken":  "{F8}",
+                                                "PageNextDisplay":  "F8",
+                                                "EndOfListText":  "Bottom of List",
+                                                "DupDetectThreshold":  0.995,
+                                                "MaxPages":  500,
+                                                "MaxRowRetries":  3,
+                                                "LogScreen2Text":  true,
+                                                "OutputFileName":  "pipeline_component_versions.txt"
                                             },
                           "Component":  {
                                             "ZoomActionToken":  "{ENTER}",

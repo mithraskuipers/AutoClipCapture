@@ -418,6 +418,49 @@ function Add-PipelineComponentListDefaults {
     if ($cl.DupDetectThreshold -gt 1) { $cl.DupDetectThreshold = $cl.DupDetectThreshold / 100.0 }  # tolerate "99.5" as well as "0.995"
 }
 
+# Screen1Select is the block CalibrateScreen1AutoGuided.ps1 fills in
+# (OriginX/OriginY/CharWidthPx/CharHeightPx/ClickColumnOffset) and that
+# AutoClipCaptureSqlPipelineScreen1.ps1 reads to click the "B" selection
+# field on each row of Screen 1 (REPOSITORY LIST) before typing into it.
+# OriginX/Y/CharWidthPx/CharHeightPx default to 0 - meaning "not
+# calibrated yet" - so a fresh config doesn't throw, it just won't click
+# in a useful spot until CalibrateScreen1AutoGuided.bat has been run.
+function Add-PipelineScreen1SelectDefaults {
+    param($Pipeline)
+    if ($null -eq $Pipeline) { return }
+
+    $defaults = @{
+        OriginX            = 0
+        OriginY            = 0
+        CharWidthPx        = 0
+        CharHeightPx       = 0
+        ClickColumnOffset  = -2
+        SelectionText      = 'B'
+        RowsPerPage        = 25
+        PageNextToken      = '{F8}'
+        PageNextDisplay    = 'F8'
+        EndOfListText      = 'Bottom of List'
+        DupDetectThreshold = 0.995
+        MaxPages           = 500
+        MaxRowRetries      = 3
+        LogScreen2Text     = $true
+        OutputFileName     = 'pipeline_component_versions.txt'
+    }
+
+    if (-not ($Pipeline.PSObject.Properties.Name -contains 'Screen1Select') -or $null -eq $Pipeline.Screen1Select) {
+        $Pipeline | Add-Member -NotePropertyName Screen1Select -NotePropertyValue ([pscustomobject]$defaults) -Force
+        return
+    }
+
+    $s1 = $Pipeline.Screen1Select
+    foreach ($key in $defaults.Keys) {
+        if (-not ($s1.PSObject.Properties.Name -contains $key)) {
+            $s1 | Add-Member -NotePropertyName $key -NotePropertyValue $defaults[$key] -Force
+        }
+    }
+    if ($s1.DupDetectThreshold -gt 1) { $s1.DupDetectThreshold = $s1.DupDetectThreshold / 100.0 }  # tolerate "99.5" as well as "0.995"
+}
+
 foreach ($p in $PipelineConfigs) {
     if (-not ($p.PSObject.Properties.Name -contains 'UseFocusedWindow')) {
         $p | Add-Member -NotePropertyName UseFocusedWindow -NotePropertyValue $false -Force
@@ -431,6 +474,7 @@ foreach ($p in $PipelineConfigs) {
         $p.Sql | Add-Member -NotePropertyName MaxIterations -NotePropertyValue 500 -Force
     }
     Add-PipelineComponentListDefaults -Pipeline $p
+    Add-PipelineScreen1SelectDefaults -Pipeline $p
 }
 
 $ToggleHotkeyId  = 1
@@ -510,7 +554,23 @@ public static class Win32
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
+
+    // ---- Mouse click support (used by the cobol-pipeline's Screen1
+    // row-selection step: AutoClipCaptureSqlPipelineScreen1.ps1 clicks
+    // the "B" selection field on a specific row before typing into it,
+    // using the same client-coordinate math as
+    // CalibrateScreen1AutoGuided.ps1/Screen1Select in the config). ----
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
 }
+
+public struct POINT { public int X; public int Y; }
 
 public class HotkeyForm : Form
 {
@@ -1284,6 +1344,10 @@ function Stop-PipelineCapture {
     $global:CR_PipelineListPageIdx      = 0
     $global:CR_PipelineListPrevFiltered = $null
     $global:CR_PipelineListOutputPath   = $null
+    $global:CR_PipelineScreen1PageIdx      = 0
+    $global:CR_PipelineScreen1PrevPageText = $null
+    $global:CR_PipelineScreen1RetryCount   = 0
+    $global:CR_PipelineScreen2CapturedText = $null
     $global:CR_TargetHandle          = [IntPtr]::Zero
     Hide-RelayStatus
 }
@@ -1386,6 +1450,15 @@ $global:CR_PipelineCurrentScreen    = 0   # 0 = unknown, else 1/2/3 - see Get-Pi
 $global:CR_PipelineListPageIdx      = 0     # how many pages have been saved so far
 $global:CR_PipelineListPrevFiltered = $null # previous page's filtered text, for end-of-list comparison
 $global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_component_list.txt for this run
+
+# ---- Screen1 row-selection state (see AutoClipCaptureSqlPipelineScreen1.ps1).
+# $global:CR_PipelineComponentIdx (declared above) is reused here as the
+# 0-based row index *within the current page* (reset to 0 every time a
+# new page is paged into). ----
+$global:CR_PipelineScreen1PageIdx      = 0     # 0-based page counter, for MaxPages/logging
+$global:CR_PipelineScreen1PrevPageText = $null # previous page's raw capture, for end-of-list duplicate detection
+$global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen" retries for the current row
+$global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -1922,6 +1995,10 @@ $hotkeyAction = {
             $global:CR_PipelineListPageIdx      = 0
             $global:CR_PipelineListPrevFiltered = $null
             $global:CR_PipelineListOutputPath   = if ($useComponentList) { Join-Path $LogDir $pipeline.ComponentList.OutputFileName } else { $null }
+            $global:CR_PipelineScreen1PageIdx      = 0
+            $global:CR_PipelineScreen1PrevPageText = $null
+            $global:CR_PipelineScreen1RetryCount   = 0
+            $global:CR_PipelineScreen2CapturedText = $null
 
             $timer.Stop()
             $timer.Start()
