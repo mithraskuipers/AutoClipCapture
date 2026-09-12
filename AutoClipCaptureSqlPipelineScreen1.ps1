@@ -117,7 +117,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompZoom_Action' {
             if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select isn't calibrated yet - run CalibrateScreen1AutoGuided.bat first. Stopping." -ForegroundColor Red
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select isn't calibrated yet - run CalibrateScreen1Auto.bat first. Stopping." -ForegroundColor Red
                 Show-RelayResultOverlay -Text "NOT CALIBRATED - STOPPED" -Color ([System.Drawing.Color]::Red)
                 Stop-PipelineCapture
                 return
