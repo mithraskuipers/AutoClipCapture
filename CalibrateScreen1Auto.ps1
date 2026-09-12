@@ -204,6 +204,17 @@ function Find-DarkRectangle {
 Write-Host "=====================================================" -ForegroundColor Yellow
 Write-Host " Screen1Select Automatic Calibration" -ForegroundColor Yellow
 Write-Host "=====================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "ASSUMPTIONS this calibration relies on:" -ForegroundColor Magenta
+Write-Host "  - Windows display scaling is set to 100% (Settings > System > Display)." -ForegroundColor Magenta
+Write-Host "  - The terminal's font size / window size won't change after this runs -" -ForegroundColor Magenta
+Write-Host "    if either does, the saved numbers go stale and you'll need to" -ForegroundColor Magenta
+Write-Host "    recalibrate (clicks will drift, worse further down the page)." -ForegroundColor Magenta
+Write-Host "  - The terminal window is fully visible on screen and not covered by" -ForegroundColor Magenta
+Write-Host "    another window right when the screenshot below is taken." -ForegroundColor Magenta
+Write-Host "  - The terminal renders on a solid dark/black background (this is what" -ForegroundColor Magenta
+Write-Host "    the detection below actually looks for)." -ForegroundColor Magenta
+Write-Host ""
 
 $configPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 if (-not (Test-Path $configPath)) {
@@ -323,6 +334,8 @@ $pt.Y = [int][math]::Round($confirmY)
 Write-Host ""
 Write-Host "Pointer moved to the computed first-data-row selection field (next to 'COB')." -ForegroundColor Cyan
 Write-Host "Look at the terminal - does it land there? ENTER to save, Esc to cancel." -ForegroundColor Cyan
+Write-Host "(Reminder: this assumes 100% display scaling and today's font/window size." -ForegroundColor DarkGray
+Write-Host " Recalibrate if either changes later.)" -ForegroundColor DarkGray
 while ($true) {
     $key = [Console]::ReadKey($true)
     if ($key.Key -eq 'Enter') { break }
@@ -337,6 +350,13 @@ $chosenPipeline.Screen1Select.OriginX = $OriginX
 $chosenPipeline.Screen1Select.OriginY = $OriginY
 $chosenPipeline.Screen1Select.CharWidthPx = $CharWidthPx
 $chosenPipeline.Screen1Select.CharHeightPx = $CharHeightPx
+
+$calibNote = "Auto-calibrated {0} assuming 100% Windows display scaling. Recalibrate if display scaling, the terminal's font size, or (if the emulator scales its content) the window size changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote')) {
+    $chosenPipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $calibNote -Force
+} else {
+    $chosenPipeline.Screen1Select.CalibrationNote = $calibNote
+}
 
 $backupPath = Join-Path $PSScriptRoot ("AutoClipCaptureConfig.backup-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 Copy-Item -Path $configPath -Destination $backupPath -Force

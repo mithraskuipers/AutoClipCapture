@@ -445,6 +445,7 @@ function Add-PipelineScreen1SelectDefaults {
         MaxRowRetries      = 3
         LogScreen2Text     = $true
         OutputFileName     = 'pipeline_component_versions.txt'
+        CalibrationNote    = 'Not calibrated yet - run CalibrateScreen1Auto.bat (or CalibrateScreen1AutoGuided.bat).'
     }
 
     if (-not ($Pipeline.PSObject.Properties.Name -contains 'Screen1Select') -or $null -eq $Pipeline.Screen1Select) {
@@ -2009,6 +2010,9 @@ $hotkeyAction = {
             } else {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
                 Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting..." ([System.Drawing.Color]::Lime)
+                if ($null -ne $pipeline.Screen1Select -and -not [string]::IsNullOrEmpty($pipeline.Screen1Select.CalibrationNote)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select note: $($pipeline.Screen1Select.CalibrationNote)" -ForegroundColor DarkGray
+                }
             }
         } finally {
             $global:CR_Selecting = $false

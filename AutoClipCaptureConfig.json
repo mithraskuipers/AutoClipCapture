@@ -88,7 +88,8 @@
                                                 "MaxPages":  500,
                                                 "MaxRowRetries":  3,
                                                 "LogScreen2Text":  true,
-                                                "OutputFileName":  "pipeline_component_versions.txt"
+                                                "OutputFileName":  "pipeline_component_versions.txt",
+                                                "CalibrationNote":  "Not calibrated yet - run CalibrateScreen1Auto.bat (or CalibrateScreen1AutoGuided.bat)."
                                             },
                           "Component":  {
                                             "ZoomActionToken":  "{ENTER}",
