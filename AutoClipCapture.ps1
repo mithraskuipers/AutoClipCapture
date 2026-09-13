@@ -867,6 +867,18 @@ foreach ($p in $PipelineConfigs) {
     $PipelineHotkeyMap[$hkId] = $p
 }
 
+# ---- Flag any pipeline whose Screen1Select still has the
+# uncalibrated 0/0/0/0 placeholder geometry, right at startup - purely
+# informational here (the window to calibrate against may not even be
+# open yet), so it doesn't block. The actual interactive Yes/No gate
+# happens at Ctrl+Shift+M time, once the target window is known - see
+# Show-Screen1CalibrationPrompt in the hotkey handler below. ----
+foreach ($p in $PipelineHotkeyMap.Values) {
+    if ($null -ne $p.Screen1Select -and -not (Test-Screen1Calibrated -Screen1Select $p.Screen1Select)) {
+        Write-Host "[AutoClipCapture] [$($p.Name)] Screen1Select isn't calibrated yet - you'll be asked about it when its hotkey is pressed." -ForegroundColor Yellow
+    }
+}
+
 # ---- Top-left status overlay: a tiny always-on-top banner that never
 # steals keyboard focus (StatusOverlay overrides ShowWithoutActivation
 # and adds WS_EX_NOACTIVATE), so showing/updating it never interrupts
@@ -1246,6 +1258,81 @@ function Confirm-TargetWindow {
     return ($result -eq $IDYES)
 }
 
+# True only when Screen1Select has real (non-zero) pixel geometry -
+# i.e. CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 has
+# actually been run for this pipeline, not just the placeholder
+# 0/0/0/0 a fresh config ships with.
+function Test-Screen1Calibrated {
+    param($Screen1Select)
+    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0)
+}
+
+# Asks (Yes/No) whether to launch calibration right now for a pipeline
+# whose Screen1Select isn't calibrated yet. Same MessageBoxW pattern as
+# Confirm-TargetWindow, for the same reason - this fires from the
+# Ctrl+Shift+M global hotkey handler, so there's no already-focused
+# WinForms window to make foreground/topmost on its own.
+function Show-Screen1CalibrationPrompt {
+    param([string]$PipelineName)
+    $msg = "'$PipelineName' isn't calibrated yet (Screen1Select has no pixel geometry).`n`nRun calibration now?`n`nYes = launch CalibrateScreen1Auto.ps1 now.`nNo  = skip and try to start anyway (it will stop immediately if it's really not calibrated)."
+
+    $MB_YESNO         = 0x00000004
+    $MB_ICONQUESTION  = 0x00000020
+    $MB_DEFBUTTON1    = 0x00000000
+    $MB_TOPMOST       = 0x00040000
+    $MB_SETFOREGROUND = 0x00010000
+    $flags = $MB_YESNO -bor $MB_ICONQUESTION -bor $MB_DEFBUTTON1 -bor $MB_TOPMOST -bor $MB_SETFOREGROUND
+
+    $IDYES = 6
+    $result = [Win32]::MessageBoxW([IntPtr]::Zero, $msg, "Screen1 Not Calibrated", [uint32]$flags)
+    return ($result -eq $IDYES)
+}
+
+# Runs CalibrateScreen1Auto.ps1 to completion (blocking - waits for the
+# user to accept/cancel it), then re-reads AutoClipCaptureConfig.json
+# and copies the fresh OriginX/OriginY/CharWidthPx/CharHeightPx/
+# ClickColumnOffset/CalibrationNote onto the *existing* in-memory
+# $Pipeline.Screen1Select object (matched by pipeline Id) rather than
+# replacing $Pipeline itself - $PipelineHotkeyMap and
+# $global:CR_ActivePipelineConfig hold references to that same object,
+# so calibration takes effect immediately without restarting
+# AutoClipCapture.ps1.
+function Invoke-Screen1CalibrationNow {
+    param($Pipeline)
+
+    $calibScript = Join-Path $PSScriptRoot "CalibrateScreen1Auto.ps1"
+    if (-not (Test-Path $calibScript)) {
+        Write-Host "[AutoClipCapture] Can't find CalibrateScreen1Auto.ps1 next to this script." -ForegroundColor Red
+        return
+    }
+
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList @('-STA','-NoProfile','-NoLogo','-ExecutionPolicy','Bypass','-File', "`"$calibScript`"") `
+        -Wait
+
+    if (-not (Test-Path $ConfigPath)) { return }
+    try {
+        $freshConfig = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
+    } catch {
+        Write-Host "[AutoClipCapture] Couldn't re-read AutoClipCaptureConfig.json after calibration: $_" -ForegroundColor Yellow
+        return
+    }
+
+    $freshPipeline = $freshConfig.Pipelines | Where-Object { $_.Id -eq $Pipeline.Id } | Select-Object -First 1
+    if ($null -eq $freshPipeline -or $null -eq $freshPipeline.Screen1Select -or $null -eq $Pipeline.Screen1Select) { return }
+
+    $Pipeline.Screen1Select.OriginX          = $freshPipeline.Screen1Select.OriginX
+    $Pipeline.Screen1Select.OriginY          = $freshPipeline.Screen1Select.OriginY
+    $Pipeline.Screen1Select.CharWidthPx      = $freshPipeline.Screen1Select.CharWidthPx
+    $Pipeline.Screen1Select.CharHeightPx     = $freshPipeline.Screen1Select.CharHeightPx
+    $Pipeline.Screen1Select.ClickColumnOffset = $freshPipeline.Screen1Select.ClickColumnOffset
+    if ($Pipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote') {
+        $Pipeline.Screen1Select.CalibrationNote = $freshPipeline.Screen1Select.CalibrationNote
+    } else {
+        $Pipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $freshPipeline.Screen1Select.CalibrationNote -Force
+    }
+}
+
 # Shown when back-to-back captures come back nearly identical. Returns
 # 'Continue' or 'Stop'.
 function Show-DuplicateCapturePrompt {
@@ -1333,7 +1420,7 @@ function Stop-PipelineCapture {
     $timer.Stop()
     $global:CR_ActiveAutomation      = $null
     $global:CR_ActivePipelineConfig  = $null
-    $global:CR_PipelineState         = 'CompZoom_Action'
+    $global:CR_PipelineState         = 'CompScan_Action'
     $global:CR_ElapsedMs             = 0
     $global:CR_PipelineComponentIdx  = 0
     $global:CR_PipelineEnvironmentIdx = 0
@@ -1348,6 +1435,7 @@ function Stop-PipelineCapture {
     $global:CR_PipelineScreen1PageIdx      = 0
     $global:CR_PipelineScreen1PrevPageText = $null
     $global:CR_PipelineScreen1RetryCount   = 0
+    $global:CR_PipelineScreen1Rows          = @()
     $global:CR_PipelineScreen2CapturedText = $null
     $global:CR_TargetHandle          = [IntPtr]::Zero
     Hide-RelayStatus
@@ -1438,7 +1526,7 @@ $global:CR_ModeIterations   = 0
 # same convention as Modes). See the tick handler below for the full
 # CompZoom -> CompNext / EnvZoom -> EnvNext / Sql -> Back state chain.
 $global:CR_ActivePipelineConfig     = $null
-$global:CR_PipelineState            = 'CompZoom_Action'
+$global:CR_PipelineState            = 'CompScan_Action'
 $global:CR_PipelineComponentIdx     = 0
 $global:CR_PipelineEnvironmentIdx   = 0
 $global:CR_PipelineSqlIterations    = 0
@@ -1454,11 +1542,12 @@ $global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_componen
 
 # ---- Screen1 row-selection state (see AutoClipCaptureSqlPipelineScreen1.ps1).
 # $global:CR_PipelineComponentIdx (declared above) is reused here as the
-# 0-based row index *within the current page* (reset to 0 every time a
-# new page is paged into). ----
+# 0-based index *into $global:CR_PipelineScreen1Rows* (reset to 0 every
+# time a new page is scanned/paged into). ----
 $global:CR_PipelineScreen1PageIdx      = 0     # 0-based page counter, for MaxPages/logging
 $global:CR_PipelineScreen1PrevPageText = $null # previous page's raw capture, for end-of-list duplicate detection
-$global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen" retries for the current row
+$global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen"/"no rows found" retries
+$global:CR_PipelineScreen1Rows         = @()   # detected @{ LineIndex; ColIndex } for each "COB" row on the current page
 $global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
 
 $timer = New-Object System.Windows.Forms.Timer
@@ -1552,7 +1641,10 @@ $tickAction = {
             }
         } catch {
             Write-Host "[AutoClipCapture] [$($global:CR_ActivePipelineConfig.Name)] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
-            $global:CR_PipelineState = 'CompZoom_Action'
+            # Re-scan rather than resume CompZoom_Action directly - the
+            # error could have hit mid-scan, leaving
+            # $global:CR_PipelineScreen1Rows stale or empty.
+            $global:CR_PipelineState = 'CompScan_Action'
             $global:CR_ElapsedMs = 0
         }
         return
@@ -1979,12 +2071,36 @@ $hotkeyAction = {
 
             $useComponentList = ($null -ne $pipeline.ComponentList) -and [bool]$pipeline.ComponentList.Enabled
 
+            # ---- Screen1 calibration gate: the row-scanning pass
+            # (CompScan_Action, see Screen1.ps1) needs real pixel
+            # geometry to click anywhere. Catch an uncalibrated
+            # pipeline here - with the target window already known and
+            # focused - rather than letting it fail deep in the state
+            # machine. Yes launches calibration and picks the result up
+            # immediately (no restart needed); No skips the check and
+            # tries to start anyway (Screen1.ps1's own guard will still
+            # stop it cleanly if it's genuinely still 0/0/0/0). ----
+            if (-not $useComponentList -and $null -ne $pipeline.Screen1Select -and -not (Test-Screen1Calibrated -Screen1Select $pipeline.Screen1Select)) {
+                if (Show-Screen1CalibrationPrompt -PipelineName $pipeline.Name) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Launching Screen1 calibration..." -ForegroundColor Cyan
+                    Invoke-Screen1CalibrationNow -Pipeline $pipeline
+                    if (-not (Test-Screen1Calibrated -Screen1Select $pipeline.Screen1Select)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still not calibrated - start cancelled." -ForegroundColor Yellow
+                        Hide-RelayStatus
+                        return
+                    }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibrated - continuing." -ForegroundColor Green
+                } else {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibration check skipped by user - attempting to start anyway." -ForegroundColor Yellow
+                }
+            }
+
             Hide-RelayResultOverlay
             $global:CR_TargetHandle             = $target.Handle
             $global:CR_TargetTitle              = $target.Title
             $global:CR_ActiveAutomation         = $pipeline.Id
             $global:CR_ActivePipelineConfig     = $pipeline
-            $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompZoom_Action' }
+            $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompScan_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
             $global:CR_PipelineEnvironmentIdx   = 0
@@ -1999,6 +2115,7 @@ $hotkeyAction = {
             $global:CR_PipelineScreen1PageIdx      = 0
             $global:CR_PipelineScreen1PrevPageText = $null
             $global:CR_PipelineScreen1RetryCount   = 0
+            $global:CR_PipelineScreen1Rows          = @()
             $global:CR_PipelineScreen2CapturedText = $null
 
             $timer.Stop()
