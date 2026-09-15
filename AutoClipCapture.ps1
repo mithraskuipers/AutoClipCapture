@@ -215,6 +215,8 @@ function Get-DefaultConfig {
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C"; RequireRightModifier = $false }  # Ctrl+Alt+C
         ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }  # Ctrl+Alt+X
         F3Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }     # Alt+Shift+Comma ('<') -> single F3 press
+        PipelineStepConfirmEnabled = $true
+        StepConfirmHotkey     = [pscustomobject]@{ Modifiers = 0; Key = 0x27; Display = "Right Arrow" }   # VK_RIGHT
         ResultOverlayDurationMs = 4000
         Modes                 = @( Get-DefaultSqlSearchMode )
         Pipelines             = @()
@@ -329,6 +331,29 @@ if ($Config.PSObject.Properties.Name -contains 'ResultOverlayDurationMs') {
     $ResultOverlayDurationMs = [int]$Config.ResultOverlayDurationMs
 } else {
     $ResultOverlayDurationMs = 4000
+}
+
+# ---- Pipeline step-confirm mode: when enabled, a Pipeline (e.g.
+# Ctrl+Shift+M) no longer sends its keystrokes/clicks automatically one
+# after another. Instead, before each one it shows what it's about to
+# do (and, for a Screen1 row click, exactly where via a red circle
+# marker) and waits for StepConfirmHotkey (Right Arrow by default) to
+# be pressed before actually doing it. Set PipelineStepConfirmEnabled
+# to false in the config to go back to fully automatic. ----
+if ($Config.PSObject.Properties.Name -contains 'PipelineStepConfirmEnabled') {
+    $global:CR_StepConfirmEnabled = [bool]$Config.PipelineStepConfirmEnabled
+} else {
+    $global:CR_StepConfirmEnabled = $true
+}
+
+if ($Config.PSObject.Properties.Name -contains 'StepConfirmHotkey' -and $null -ne $Config.StepConfirmHotkey) {
+    $StepConfirmModifiers = [int]$Config.StepConfirmHotkey.Modifiers
+    $StepConfirmKey       = [int]$Config.StepConfirmHotkey.Key
+    $StepConfirmDisplay   = [string]$Config.StepConfirmHotkey.Display
+} else {
+    $StepConfirmModifiers = 0
+    $StepConfirmKey       = 0x27   # VK_RIGHT
+    $StepConfirmDisplay   = 'Right Arrow'
 }
 
 # Older config files won't have a Modes array yet - fall back to the
@@ -489,6 +514,8 @@ $ExitModifiers   = [int]$Config.ExitHotkey.Modifiers
 $ExitKey         = [int]$Config.ExitHotkey.Key
 $ExitDisplay     = [string]$Config.ExitHotkey.Display
 $ExitRequireRightModifier = ($Config.ExitHotkey.PSObject.Properties.Name -contains 'RequireRightModifier') -and [bool]$Config.ExitHotkey.RequireRightModifier
+
+$StepConfirmHotkeyId = 4   # NOT registered at startup - only while a Pipeline is actively running (see Register-PipelineStepHotkey), so Right Arrow behaves normally everywhere else
 
 $F3HotkeyId      = 3
 if ($Config.PSObject.Properties.Name -contains 'F3Hotkey' -and $null -ne $Config.F3Hotkey) {
@@ -981,6 +1008,106 @@ function Hide-RelayResultOverlay {
     $resultOverlay.Hide()
 }
 
+# ---- Small red-circle marker used by the pipeline step-confirm gate
+# below to show exactly where a Screen1 row click is about to land,
+# BEFORE the click actually happens. Same non-activating StatusOverlay
+# window type as the status banner/result overlay above, so showing it
+# never steals focus away from the target window. ----
+$stepMarker = New-Object StatusOverlay
+$stepMarker.FormBorderStyle = 'None'
+$stepMarker.StartPosition   = 'Manual'
+$stepMarker.ShowInTaskbar   = $false
+$stepMarker.TopMost         = $true
+$stepMarker.Size            = New-Object System.Drawing.Size(46, 46)
+$stepMarker.BackColor       = [System.Drawing.Color]::Magenta
+$stepMarker.TransparencyKey = [System.Drawing.Color]::Magenta
+$stepMarker.Add_Paint({
+    param($sender, $e)
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 4)
+    $e.Graphics.DrawEllipse($pen, 3, 3, 39, 39)
+    $pen.Dispose()
+})
+
+[void]$stepMarker.Handle
+$stepMarker.Hide()
+
+function Show-StepMarker {
+    param([System.Drawing.Point]$ScreenPoint)
+    $stepMarker.Location = New-Object System.Drawing.Point(($ScreenPoint.X - 23), ($ScreenPoint.Y - 23))
+    if (-not $stepMarker.Visible) { $stepMarker.Show() }
+    $stepMarker.Invalidate()
+    $stepMarker.BringToFront()
+}
+
+function Hide-StepMarker {
+    $stepMarker.Hide()
+}
+
+# ---- Registers/unregisters the step-confirm hotkey (Right Arrow by
+# default) ONLY while a Pipeline is actually running. It is never
+# registered at startup like Toggle/Exit/F3 are, so it never swallows
+# Right Arrow presses in other applications the rest of the time. ----
+function Register-PipelineStepHotkey {
+    if (-not $global:CR_StepConfirmEnabled) { return }
+    if ($global:CR_StepHotkeyRegistered) { return }
+    if ([HotkeyForm]::RegisterHotKey($FormHandle, $StepConfirmHotkeyId, $StepConfirmModifiers, $StepConfirmKey)) {
+        $global:CR_StepHotkeyRegistered = $true
+    } else {
+        Write-Host "[AutoClipCapture] Could not register the step-confirm hotkey ($StepConfirmDisplay) - it may already be in use elsewhere. The pipeline will stall waiting for it; disable PipelineStepConfirmEnabled in the config or free up that key." -ForegroundColor Red
+    }
+}
+
+function Unregister-PipelineStepHotkey {
+    if (-not $global:CR_StepHotkeyRegistered) { return }
+    [void][HotkeyForm]::UnregisterHotKey($FormHandle, $StepConfirmHotkeyId)
+    $global:CR_StepHotkeyRegistered = $false
+}
+
+# ---- The step-confirm gate itself. Call this at the very top of any
+# pipeline state that is about to send real input (a keystroke or a
+# mouse click), right after computing exactly what that input will be
+# (including, if it's a click, the exact screen point). Returns $true
+# if the caller should stop and return without doing anything yet
+# (still waiting on the user), or $false once it's fine to go ahead -
+# either because step-confirm is switched off, or because the pending
+# step was just confirmed via the Right Arrow hotkey.
+#
+# $Description is shown in the corner status banner in place of the
+# usual "doing X" text, with a "[<key> to continue]" suffix appended.
+# $MarkerPoint (optional) additionally shows the red-circle marker at
+# that screen point for as long as the step is pending, so a wrong
+# click target is obvious before anything is actually clicked. ----
+function Request-PipelineStepConfirm {
+    param(
+        [string]$Description,
+        [System.Drawing.Point]$MarkerPoint
+    )
+
+    if (-not $global:CR_StepConfirmEnabled) { return $false }
+
+    if ($global:CR_PipelineStepConfirmed) {
+        # Right Arrow was pressed for this pending step - consume it
+        # and let the caller proceed with the actual input now.
+        $global:CR_PipelineStepConfirmed   = $false
+        $global:CR_PipelineStepPending     = $false
+        $global:CR_PipelineStepDescription = ''
+        Hide-StepMarker
+        return $false
+    }
+
+    if (-not $global:CR_PipelineStepPending) {
+        $global:CR_PipelineStepPending     = $true
+        $global:CR_PipelineStepDescription = $Description
+        Set-RelayStatus "$Description   [$StepConfirmDisplay to continue]" ([System.Drawing.Color]::Yellow)
+        if ($PSBoundParameters.ContainsKey('MarkerPoint')) {
+            Show-StepMarker -ScreenPoint $MarkerPoint
+        } else {
+            Hide-StepMarker
+        }
+    }
+    return $true
+}
+
 # Case-insensitive "does Text contain Needle" check used by Mode
 # evaluation. Plain substring search (not -like/-match), so a needle
 # that itself contains wildcard-ish characters like * still matches the
@@ -1438,6 +1565,11 @@ function Stop-PipelineCapture {
     $global:CR_PipelineScreen1Rows          = @()
     $global:CR_PipelineScreen2CapturedText = $null
     $global:CR_TargetHandle          = [IntPtr]::Zero
+    $global:CR_PipelineStepPending     = $false
+    $global:CR_PipelineStepConfirmed   = $false
+    $global:CR_PipelineStepDescription = ''
+    Unregister-PipelineStepHotkey
+    Hide-StepMarker
     Hide-RelayStatus
 }
 
@@ -1550,6 +1682,12 @@ $global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized scree
 $global:CR_PipelineScreen1Rows         = @()   # detected @{ LineIndex; ColIndex } for each "COB" row on the current page
 $global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
 
+# ---- Step-confirm gate state (see Request-PipelineStepConfirm) ----
+$global:CR_PipelineStepPending     = $false   # true while a queued input is waiting on Right Arrow
+$global:CR_PipelineStepConfirmed   = $false   # set by the StepConfirmHotkeyId handler, consumed by Request-PipelineStepConfirm
+$global:CR_PipelineStepDescription = ''
+$global:CR_StepHotkeyRegistered    = $false   # whether the Right Arrow hotkey is currently registered (only while a pipeline runs)
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
 
@@ -1588,6 +1726,9 @@ $tickAction = {
                 # screen 2". A mismatch stops the pipeline rather than
                 # risk compounding it by pressing on regardless. ----
                 'Back_Action' {
+                    $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press $F3Display to go back"
+                    if (Request-PipelineStepConfirm -Description $desc) { return }
+
                     if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                         Stop-PipelineCapture
@@ -1955,6 +2096,14 @@ $hotkeyAction = {
         [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
         Write-Host "[AutoClipCapture] F3 sent to the focused window." -ForegroundColor Green
     }
+    elseif ($id -eq $StepConfirmHotkeyId) {
+        # Only ever registered while a pipeline is running (see
+        # Register-PipelineStepHotkey), and only actually does
+        # anything if a step is currently pending confirmation.
+        if ($global:CR_PipelineStepPending) {
+            $global:CR_PipelineStepConfirmed = $true
+        }
+    }
     elseif ($ModeHotkeyMap.ContainsKey($id)) {
         $mode = $ModeHotkeyMap[$id]
         if (-not (Test-RightModifierSatisfied -Modifiers ([int]$mode.Hotkey.Modifiers) -RequireRight ([bool]$mode.Hotkey.RequireRightModifier))) { return }
@@ -2117,6 +2266,11 @@ $hotkeyAction = {
             $global:CR_PipelineScreen1RetryCount   = 0
             $global:CR_PipelineScreen1Rows          = @()
             $global:CR_PipelineScreen2CapturedText = $null
+            $global:CR_PipelineStepPending     = $false
+            $global:CR_PipelineStepConfirmed   = $false
+            $global:CR_PipelineStepDescription = ''
+            Hide-StepMarker
+            Register-PipelineStepHotkey
 
             $timer.Stop()
             $timer.Start()
@@ -2126,6 +2280,9 @@ $hotkeyAction = {
                 Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting component list..." ([System.Drawing.Color]::Lime)
             } else {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
+                if ($global:CR_StepConfirmEnabled) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Step-confirm mode is ON - press $StepConfirmDisplay each time to let the next input through." -ForegroundColor Cyan
+                }
                 Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting..." ([System.Drawing.Color]::Lime)
                 if ($null -ne $pipeline.Screen1Select -and -not [string]::IsNullOrEmpty($pipeline.Screen1Select.CalibrationNote)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select note: $($pipeline.Screen1Select.CalibrationNote)" -ForegroundColor DarkGray
@@ -2146,6 +2303,7 @@ $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $F3HotkeyId)     | Out-Null
+Unregister-PipelineStepHotkey
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
 }

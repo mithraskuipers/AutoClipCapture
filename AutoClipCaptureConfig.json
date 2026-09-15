@@ -27,6 +27,12 @@
                      "Display":  "Alt+<",
                      "RequireRightModifier":  false
                  },
+    "PipelineStepConfirmEnabled":  true,
+    "StepConfirmHotkey":  {
+                              "Modifiers":  0,
+                              "Key":  39,
+                              "Display":  "Right Arrow"
+                          },
     "ResultOverlayDurationMs":  4000,
     "Modes":  [
                   {

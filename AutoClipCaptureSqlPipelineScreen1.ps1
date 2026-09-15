@@ -184,6 +184,9 @@ function Invoke-PipelineScreen1Tick {
                 return
             }
 
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1) - about to press Ctrl+C to scan for rows"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
@@ -242,16 +245,22 @@ function Invoke-PipelineScreen1Tick {
                 return
             }
 
+            $rowIdx = [int]$global:CR_PipelineComponentIdx
+            $row = $global:CR_PipelineScreen1Rows[$rowIdx]
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+
+            # Shown BEFORE anything is clicked - the red circle marker
+            # lands on $screenPt so a wrong target is obvious right
+            # away, without a single click having happened yet.
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to click here, type '$($s1.SelectionText)' + Enter"
+            if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
                 return
             }
-
-            $rowIdx = [int]$global:CR_PipelineComponentIdx
-            $row = $global:CR_PipelineScreen1Rows[$rowIdx]
-            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
-            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
 
             Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - selecting" ([System.Drawing.Color]::Lime)
             Invoke-Screen1RowClick -ScreenPoint $screenPt
@@ -349,6 +358,9 @@ function Invoke-PipelineScreen1Tick {
                 Stop-PipelineCapture
                 return
             }
+
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press $($s1.PageNextDisplay) to page forward"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
 
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red

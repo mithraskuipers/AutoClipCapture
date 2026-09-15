@@ -45,6 +45,9 @@ function Invoke-PipelineListTick {
             $global:CR_PipelineListPageIdx      = 0
             $global:CR_PipelineListPrevFiltered = $null
 
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press Ctrl+C to capture page 1"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
@@ -124,6 +127,9 @@ function Invoke-PipelineListTick {
         }
 
         'ListCapture_Next' {
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press the next-page key to capture page $($global:CR_PipelineListPageIdx + 1)"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
