@@ -894,6 +894,17 @@ foreach ($p in $PipelineConfigs) {
     $PipelineHotkeyMap[$hkId] = $p
 }
 
+# True only when Screen1Select has real (non-zero) pixel geometry -
+# i.e. CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 has
+# actually been run for this pipeline, not just the placeholder
+# 0/0/0/0 a fresh config ships with. Defined here (before the startup
+# flagging loop just below, and well before the Ctrl+Shift+M handler
+# further down) since both call it.
+function Test-Screen1Calibrated {
+    param($Screen1Select)
+    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0)
+}
+
 # ---- Flag any pipeline whose Screen1Select still has the
 # uncalibrated 0/0/0/0 placeholder geometry, right at startup - purely
 # informational here (the window to calibrate against may not even be
@@ -917,14 +928,16 @@ $statusForm.ShowInTaskbar   = $false
 $statusForm.TopMost         = $true
 $statusForm.BackColor       = [System.Drawing.Color]::Black
 $statusForm.Opacity         = 0.85
-$statusForm.Size            = New-Object System.Drawing.Size(320, 32)
+$statusForm.Size            = New-Object System.Drawing.Size(760, 64)
 
 $screenArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $statusForm.Location = New-Object System.Drawing.Point(($screenArea.Left + 8), ($screenArea.Top + 8))
 
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Dock      = 'Fill'
-$statusLabel.TextAlign = 'MiddleCenter'
+$statusLabel.Padding   = New-Object System.Windows.Forms.Padding(8, 4, 8, 4)
+$statusLabel.AutoSize  = $false
+$statusLabel.TextAlign = 'MiddleLeft'
 $statusLabel.ForeColor = [System.Drawing.Color]::Lime
 $statusLabel.Font      = New-Object System.Drawing.Font('Consolas', 9, [System.Drawing.FontStyle]::Bold)
 $statusLabel.Text      = ''
@@ -1383,15 +1396,6 @@ function Confirm-TargetWindow {
     $IDYES = 6
     $result = [Win32]::MessageBoxW([IntPtr]::Zero, $msg, "Confirm Target Window", [uint32]$flags)
     return ($result -eq $IDYES)
-}
-
-# True only when Screen1Select has real (non-zero) pixel geometry -
-# i.e. CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 has
-# actually been run for this pipeline, not just the placeholder
-# 0/0/0/0 a fresh config ships with.
-function Test-Screen1Calibrated {
-    param($Screen1Select)
-    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0)
 }
 
 # Asks (Yes/No) whether to launch calibration right now for a pipeline

@@ -1,4 +1,4 @@
-﻿{
+{
     "LogFile":  "CapturedOutput.txt",
     "CopyDelayMs":  250,
     "AfterActionKeyDelayMs":  250,
@@ -24,7 +24,7 @@
     "F3Hotkey":  {
                      "Modifiers":  5,
                      "Key":  188,
-                     "Display":  "Alt+\u003c",
+                     "Display":  "Alt+<",
                      "RequireRightModifier":  false
                  },
     "PipelineStepConfirmEnabled":  true,
@@ -42,7 +42,7 @@
                       "Hotkey":  {
                                      "Modifiers":  5,
                                      "Key":  190,
-                                     "Display":  "Alt+\u003e",
+                                     "Display":  "Alt+>",
                                      "RequireRightModifier":  false
                                  },
                       "UseFocusedWindow":  true,
@@ -50,7 +50,7 @@
                       "ActionKeyDisplay":  "F5",
                       "FoundText":  "EXEC SQL",
                       "FoundOverlayText":  "SQL FOUND",
-                      "NotFoundText":  "No CHARS \u0027sql\u0027 found",
+                      "NotFoundText":  "No CHARS 'sql' found",
                       "TerminalText":  "*Bottom of data reached*",
                       "NotFoundOverlayText":  "NO SQL FOUND",
                       "MaxIterations":  500
@@ -80,10 +80,10 @@
                                                 "EndOfListText":  "Bottom of List"
                                             },
                           "Screen1Select":  {
-                                                "OriginX":  3,
-                                                "OriginY":  137,
-                                                "CharWidthPx":  6.02,
-                                                "CharHeightPx":  32.19,
+                                                "OriginX":  0,
+                                                "OriginY":  0,
+                                                "CharWidthPx":  0,
+                                                "CharHeightPx":  0,
                                                 "ClickColumnOffset":  -2,
                                                 "SelectionText":  "B",
                                                 "RowsPerPage":  25,
@@ -95,7 +95,7 @@
                                                 "MaxRowRetries":  3,
                                                 "LogScreen2Text":  true,
                                                 "OutputFileName":  "pipeline_component_versions.txt",
-                                                "CalibrationNote":  "Auto-calibrated 2026-09-15 23:28:30 assuming 100% Windows display scaling. Recalibrate if display scaling, the terminal\u0027s font size, or (if the emulator scales its content) the window size changes."
+                                                "CalibrationNote":  "Not calibrated yet - run CalibrateScreen1Auto.bat (or CalibrateScreen1AutoGuided.bat)."
                                             },
                           "Component":  {
                                             "ZoomActionToken":  "{ENTER}",
@@ -120,7 +120,7 @@
                                       "ActionKeyDisplay":  "F5",
                                       "FoundText":  "EXEC SQL",
                                       "FoundOverlayText":  "SQL FOUND",
-                                      "NotFoundText":  "No CHARS \u0027sql\u0027 found",
+                                      "NotFoundText":  "No CHARS 'sql' found",
                                       "TerminalText":  "*Bottom of data reached*",
                                       "NotFoundOverlayText":  "NO SQL FOUND",
                                       "MaxIterations":  500
