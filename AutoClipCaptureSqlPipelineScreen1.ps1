@@ -148,6 +148,16 @@ function Get-Screen1RowScreenPoint {
     $clientX = [double]$Screen1Select.OriginX + ($targetColIndex * [double]$Screen1Select.CharWidthPx)
     $clientY = [double]$Screen1Select.OriginY + ($LineIndex * [double]$Screen1Select.CharHeightPx)
 
+    # ---- Manual display-scaling correction (entered at Ctrl+Shift+M
+    # start via Show-ScalingPrompt in AutoClipCapture.ps1). Screen1Select
+    # was measured from a real-pixel screenshot; if the process actually
+    # sending the click isn't running in that same real-pixel coordinate
+    # space (Windows DPI virtualization), this converts for it. At the
+    # default of 100 this multiplier is exactly 1.0 - a complete no-op. ----
+    $scaleFactor = 100.0 / [double]$global:CR_PipelineScalePercent
+    $clientX = $clientX * $scaleFactor
+    $clientY = $clientY * $scaleFactor
+
     $pt = New-Object POINT
     $pt.X = [int][math]::Round($clientX)
     $pt.Y = [int][math]::Round($clientY)
@@ -249,6 +259,15 @@ function Invoke-PipelineScreen1Tick {
             $row = $global:CR_PipelineScreen1Rows[$rowIdx]
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+
+            if (-not $global:CR_PipelineStepPending) {
+                $wr = New-Object RECT
+                [void][Win32]::GetWindowRect($global:CR_TargetHandle, [ref]$wr)
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1): LineIndex=$($row.LineIndex) ColIndex=$($row.ColIndex) -> click ($($screenPt.X),$($screenPt.Y))  |  Screen1Select Origin=($($s1.OriginX),$($s1.OriginY)) CharSize=$($s1.CharWidthPx)x$($s1.CharHeightPx)  |  Scaling=$($global:CR_PipelineScalePercent)%  |  Target window bounds ($($wr.Left),$($wr.Top))-($($wr.Right),$($wr.Bottom))" -ForegroundColor DarkGray
+                if ($screenPt.X -lt $wr.Left -or $screenPt.X -gt $wr.Right -or $screenPt.Y -lt $wr.Top -or $screenPt.Y -gt $wr.Bottom) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] WARNING: that click point is OUTSIDE the target window's bounds - Screen1Select needs recalibrating (CalibrateScreen1Auto.bat)." -ForegroundColor Red
+                }
+            }
 
             # Shown BEFORE anything is clicked - the red circle marker
             # lands on $screenPt so a wrong target is obvious right

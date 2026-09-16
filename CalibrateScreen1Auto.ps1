@@ -43,6 +43,36 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# ---- Make THIS PROCESS DPI-aware before the screenshot/coordinate
+# code below runs - MUST match AutoClipCapture.ps1's own DPI-awareness
+# call exactly, or the two scripts will disagree about what a pixel
+# is and every click will drift off by the display scaling percentage.
+# See the matching comment at the top of AutoClipCapture.ps1 for why.
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class CR_DpiAwareness {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int value);
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+}
+"@ -ErrorAction SilentlyContinue
+
+    $perMonitorV2 = [IntPtr](-4)
+    $setDpi = $false
+    try { $setDpi = [CR_DpiAwareness]::SetProcessDpiAwarenessContext($perMonitorV2) } catch {}
+    if (-not $setDpi) {
+        try { [void][CR_DpiAwareness]::SetProcessDpiAwareness(2) } catch {}
+        try { [void][CR_DpiAwareness]::SetProcessDPIAware() } catch {}
+    }
+} catch {
+    Write-Host "Could not set DPI awareness - if Windows display scaling isn't 100%, calibration will be off. $_" -ForegroundColor Yellow
+}
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;

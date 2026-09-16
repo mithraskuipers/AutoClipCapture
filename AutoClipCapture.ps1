@@ -186,6 +186,47 @@
 
 $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 
+# ---- Make THIS PROCESS DPI-aware before anything below ever touches
+# a screen coordinate (ClientToScreen, SetCursorPos, GetWindowRect, or
+# CalibrateScreen1Auto.ps1's screenshot capture). This has to happen
+# before any window/handle exists, so it's the very first thing this
+# script does.
+#
+# WHY THIS MATTERS: on any Windows display scaling other than 100%, an
+# app that hasn't declared itself DPI-aware gets coordinates from
+# user32 in "virtualized" (scaled-down) units instead of real pixels.
+# A screenshot (Graphics.CopyFromScreen), however, is always real
+# pixels. Mixing the two is exactly what makes a calibrated click
+# consistently land off to one side by roughly the scaling percentage,
+# no matter how carefully OriginX/CharWidthPx were measured - which is
+# the #1 real-world cause of "the red circle/click is off, and it
+# doesn't move where I expect." If Windows display scaling is already
+# 100%, this call is a harmless no-op.
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class CR_DpiAwareness {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int value);
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+}
+"@ -ErrorAction SilentlyContinue
+
+    $perMonitorV2 = [IntPtr](-4)   # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Win10 1703+)
+    $setDpi = $false
+    try { $setDpi = [CR_DpiAwareness]::SetProcessDpiAwarenessContext($perMonitorV2) } catch {}
+    if (-not $setDpi) {
+        try { [void][CR_DpiAwareness]::SetProcessDpiAwareness(2) } catch {}   # PROCESS_PER_MONITOR_DPI_AWARE (Win8.1+)
+        try { [void][CR_DpiAwareness]::SetProcessDPIAware() } catch {}         # system-DPI-aware fallback (Vista+)
+    }
+} catch {
+    Write-Host "[AutoClipCapture] Could not set DPI awareness - if Windows display scaling isn't 100%, clicks may land off-target. $_" -ForegroundColor Yellow
+}
+
 # Pipeline screen logic lives in its own file per screen, all kept in
 # this same folder (no subfolders): Screen 1 = components,
 # Screen 2 = environments, Screen 3 = the COBOL/SQL search screen.
@@ -596,7 +637,16 @@ public static class Win32
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+
+    // Used purely for diagnostics: lets the step-confirm gate print the
+    // target window's actual on-screen bounds next to a computed click
+    // point, so a click landing outside those bounds is obvious from
+    // the console output, not just from the marker looking "off".
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 }
+
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
 public struct POINT { public int X; public int Y; }
 
@@ -1419,6 +1469,37 @@ function Show-Screen1CalibrationPrompt {
     return ($result -eq $IDYES)
 }
 
+# ---- Asks for the actual Windows display scaling percentage in use
+# for the monitor the terminal is on, so Get-Screen1RowScreenPoint
+# (Screen1.ps1) can apply an explicit, user-controlled correction to
+# every computed click point - independent of, and a way to verify,
+# the automatic SetProcessDpiAwarenessContext call at the very top of
+# this script. 100 is a complete no-op (identity - enter that if you
+# trust the automatic fix). Returns an int; falls back to $Default
+# (unchanged) if the box is cancelled, left blank, or not a positive
+# number. ----
+function Show-ScalingPrompt {
+    param([string]$PipelineName, [int]$Default = 100)
+
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+    } catch {
+        Write-Host "[AutoClipCapture] Couldn't load the scaling input box - continuing with $Default% (no correction)." -ForegroundColor Yellow
+        return $Default
+    }
+
+    $prompt = "Windows display scaling for the monitor '$PipelineName''s terminal is on?" + "`n" + `
+              "(Settings > System > Display > Scale) - common values: 100, 125, 150, 175, 200." + "`n`n" + `
+              "100 = no correction applied (use this if you trust DPI-awareness is already working). Only change this if clicks/the red circle are landing off-target."
+    $answer = [Microsoft.VisualBasic.Interaction]::InputBox($prompt, "Display scaling - $PipelineName", [string]$Default)
+
+    $parsed = 0
+    if ([string]::IsNullOrWhiteSpace($answer) -or -not [int]::TryParse($answer.Trim(), [ref]$parsed) -or $parsed -le 0) {
+        return $Default
+    }
+    return $parsed
+}
+
 # Runs CalibrateScreen1Auto.ps1 to completion (blocking - waits for the
 # user to accept/cancel it), then re-reads AutoClipCaptureConfig.json
 # and copies the fresh OriginX/OriginY/CharWidthPx/CharHeightPx/
@@ -1635,6 +1716,10 @@ if ($DupDetectEnabled) {
 } else {
     Write-Host "Duplicate-capture protection: OFF"
 }
+$anyScreen1Pipeline = ($PipelineHotkeyMap.Values | Where-Object { $null -ne $_.Screen1Select }) | Select-Object -First 1
+if ($null -ne $anyScreen1Pipeline) {
+    Write-Host "This build now forces per-monitor DPI awareness before touching any screen coordinate - if Screen1Select was calibrated with an OLDER build and clicks look off (or the red circle when stepping through Ctrl+Shift+M lands outside the terminal), run CalibrateScreen1Auto.bat again to recalibrate under the new, consistent coordinates. This only matters if Windows display scaling isn't 100%." -ForegroundColor Cyan
+}
 Write-Host ""
 
 $global:CR_Running      = $false
@@ -1691,6 +1776,13 @@ $global:CR_PipelineStepPending     = $false   # true while a queued input is wai
 $global:CR_PipelineStepConfirmed   = $false   # set by the StepConfirmHotkeyId handler, consumed by Request-PipelineStepConfirm
 $global:CR_PipelineStepDescription = ''
 $global:CR_StepHotkeyRegistered    = $false   # whether the Right Arrow hotkey is currently registered (only while a pipeline runs)
+
+# ---- Manual display-scaling override for Screen1 row clicks - see
+# Show-ScalingPrompt (asked at Ctrl+Shift+M start) and
+# Get-Screen1RowScreenPoint in Screen1.ps1, which applies it. 100 =
+# no correction; persists as the pre-filled default across pipeline
+# starts within this running session, purely for convenience. ----
+$global:CR_PipelineScalePercent = 100
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -2246,6 +2338,11 @@ $hotkeyAction = {
                 } else {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibration check skipped by user - attempting to start anyway." -ForegroundColor Yellow
                 }
+            }
+
+            if ($null -ne $pipeline.Screen1Select) {
+                $global:CR_PipelineScalePercent = Show-ScalingPrompt -PipelineName $pipeline.Name -Default $global:CR_PipelineScalePercent
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Display scaling in use for row clicks: $($global:CR_PipelineScalePercent)% (100% = no correction applied)" -ForegroundColor Cyan
             }
 
             Hide-RelayResultOverlay
