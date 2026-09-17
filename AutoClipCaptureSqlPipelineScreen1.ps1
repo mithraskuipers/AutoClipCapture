@@ -96,23 +96,28 @@
 # Scans captured Screen 1 text for every data row that actually has
 # "COB" printed on it, and returns their exact (0-based) line number
 # within $Text and the (0-based) character column "COB" starts at on
-# that specific line. Scanning starts at $firstDataRowIdx0 (row 7,
-# matching CalibrateScreen1Auto.ps1's own constant) purely to skip past
-# the title/"Show Deleted"/column-header/filter rows above the real
-# list - everything from there down is checked on its own merits, so a
-# short final page (fewer rows than usual) or an odd gap is handled
-# correctly instead of assumed away.
+# that specific line.
+#
+# This used to start scanning at a fixed "row 7", on the assumption
+# that real data never appears before that line. That assumption was
+# WRONG for at least one real screen layout, where the true first
+# "COB" row sits earlier than line 7 - so this silently skipped over
+# it (and sometimes the row after it too), making the pipeline treat
+# the 2nd or 3rd real row as if it were the first. \bCOB\b is specific
+# enough that it will never accidentally match the title/"Show
+# Deleted"/column-header/filter text above the real list, so there's
+# no need for a lower bound at all: scan every line from the top of
+# the captured text, and let each line be judged purely on whether it
+# actually has "COB" on it.
 function Get-Screen1DataRows {
     param([string]$Text, $Screen1Select)
 
     $rows = New-Object System.Collections.Generic.List[object]
     if ([string]::IsNullOrEmpty($Text)) { return $rows }
 
-    $firstDataRow     = 7
-    $firstDataRowIdx0 = $firstDataRow - 1
     $lines = $Text -split "`r`n|`n|`r"
 
-    for ($i = $firstDataRowIdx0; $i -lt $lines.Count; $i++) {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if (Test-RelayTextContains -Text $line -Needle 'Bottom of List') { break }
         if (Test-RelayTextContains -Text $line -Needle 'Command ===>')   { break }
