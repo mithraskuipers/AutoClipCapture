@@ -413,9 +413,18 @@ if ($null -eq $cobMatch) {
 }
 Write-Host ("  First 'COB' found at line {0}, column {1}: `"{2}`"" -f $cobMatch.LineIndex, $cobMatch.ColIndex, $cobMatch.LineText.Trim()) -ForegroundColor Cyan
 
+# Confirmed against a real Ctrl+Shift+M run: the line index found above
+# consistently lands one row ABOVE the true first data row - most
+# likely because the Ctrl+C clipboard text's line 0 sits one line
+# below the detected rectangle's visual top edge (OriginY), not
+# exactly at it. Correcting by +1 here (and saving that corrected
+# value below) makes what you see in THIS preview match what the real
+# pipeline will actually click.
+$realLineIndex = $cobMatch.LineIndex + 1
+
 $targetColIndex = $cobMatch.ColIndex + $clickColumnOffset
 $confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
-$confirmY = $OriginY + ($cobMatch.LineIndex * $CharHeightPx)
+$confirmY = $OriginY + ($realLineIndex * $CharHeightPx)
 
 $pt = New-Object POINT2
 $pt.X = [int][math]::Round($confirmX)
@@ -451,7 +460,7 @@ $chosenPipeline.Screen1Select.CharHeightPx = $CharHeightPx
 # list is always the same fixed size), ColIndex is where "Type" text
 # (COB/ASM) starts - the selection field itself is ColIndex + ClickColumnOffset.
 foreach ($prop in @(
-    @{ Name = 'FirstDataRowLineIndex'; Value = $cobMatch.LineIndex },
+    @{ Name = 'FirstDataRowLineIndex'; Value = $realLineIndex },
     @{ Name = 'SelectionColumnIndex';  Value = $cobMatch.ColIndex  }
 )) {
     if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains $prop.Name)) {
