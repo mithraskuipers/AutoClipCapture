@@ -6,17 +6,25 @@
  Status columns, one row per component, "Row x of y ... More -->").
 
  This file drives the Ctrl+Shift+M pipeline's main job: walk every row
- of Screen 1, page by page, and for each one:
-   0. Ctrl+C the current page and find every line that actually has
-      "COB" printed on it (Get-Screen1DataRows). Row *positions* are
-      no longer assumed from a fixed RowsPerPage count - they're read
-      straight off the just-captured text, so a page with fewer rows
-      than usual (e.g. the last page of the list) is handled exactly
-      like any other: whatever COB lines are actually there is exactly
-      what gets clicked, no more, no less.
-   1. For each detected row: click 2 character columns to the left of
-      where "COB" starts *on that row's own line*
-      (Screen1Select.ClickColumnOffset, default -2 - lands on the "_"
+ slot of Screen 1, page by page, and for each one:
+   0. Row positions are FIXED, pure arithmetic - no page content is
+      read to find them. Screen1Select.FirstDataRowLineIndex and
+      Screen1Select.SelectionColumnIndex (set once by
+      CalibrateScreen1Auto.ps1, by actually finding the real first
+      "COB" row on a real screen) anchor row 0; every following row is
+      just + CharHeightPx per row, for exactly RowsPerPage rows. This
+      only works because the header above the list (title/"Show
+      Deleted: N"/column headers/filter line) is always exactly the
+      same size on every page - if that ever isn't true, row math
+      drifts and this whole approach stops being safe.
+   1. Every row slot is tried - there's no "is this actually a COB
+      row" check anymore. A slot with nothing real in it (past the end
+      of a partially-filled last page, or a non-COB row type) simply
+      doesn't navigate anywhere; step 4 below already treats that as
+      the normal "nothing happened, move on" case, so no separate
+      blank-detection step is needed.
+   1a. Click Screen1Select.ClickColumnOffset character columns to the
+      left of SelectionColumnIndex (default -2, lands on the "_"
       selection field) using the pixel math calibrated by
       CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 into
       Pipelines[].Screen1Select (OriginX/OriginY/CharWidthPx/
@@ -27,36 +35,27 @@
       logs it (if enabled) and queues a single F3 "back" to Screen 1
       (that shared "go back" mechanic lives in AutoClipCapture.ps1
       itself - see Back_Action/Back_Wait/Back_Copy).
-   4. If nothing happened (blank/unavailable row - we're still on
-      Screen 1), just move on to the next row without going back.
-   5. Once every detected row on the current page has been tried,
-      press Screen1Select.PageNextToken (F8 by default) to bring the
-      next page into view, re-scan it the same way, and keep going -
-      until either Screen1Select.EndOfListText shows up (explicit "end
-      of list" marker) or a freshly-paged screen comes back
-      near-identical to the one before it
-      (Screen1Select.DupDetectThreshold - same comparison the
-      duplicate-capture protection elsewhere uses), which means paging
-      further isn't revealing anything new either.
+   4. If nothing happened (blank slot, non-COB row, or the item is
+      unavailable) - we're still on Screen 1 - just move on to the
+      next row slot without going back.
+   5. Once every row slot on the current page (RowsPerPage of them)
+      has been tried, press Screen1Select.PageNextToken (F8 by
+      default) to bring the next page into view, and keep going with
+      the SAME fixed row slots - until either
+      Screen1Select.EndOfListText shows up (explicit "end of list"
+      marker) or a freshly-paged screen comes back near-identical to
+      the one before it (Screen1Select.DupDetectThreshold - same
+      comparison the duplicate-capture protection elsewhere uses),
+      which means paging further isn't revealing anything new either.
 
  States (all start with "Comp" so AutoClipCapture.ps1's tick switch
  routes them here):
-   CompScan_Action  - Ctrl+C the current page. This exact name is also
-                      the pipeline's hard-coded starting state (see
-                      the Ctrl+Shift+M hotkey handler), so a pipeline
-                      with no ComponentList pre-pass lands here
-                      immediately, and the very first page gets
-                      scanned before anything is clicked.
-   CompScan_Wait    - short delay before reading the clipboard, so the
-                      copy has time to land.
-   CompScan_Copy    - parse the captured text with
-                      Get-Screen1DataRows, store the detected
-                      (line, column) pairs in
-                      $global:CR_PipelineScreen1Rows, reset the row
-                      index to 0, and move on to CompZoom_Action. If
-                      nothing with "COB" on it was found at all,
-                      retries a few times (a slow-to-render screen)
-                      before giving up on the page.
+   CompScan_Action  - build the fixed row-slot list (Get-Screen1FixedRows,
+                      pure arithmetic, no clipboard read needed). This
+                      exact name is also the pipeline's hard-coded
+                      starting state (see the Ctrl+Shift+M hotkey
+                      handler), so a pipeline with no ComponentList
+                      pre-pass lands here immediately.
    CompZoom_Action  - click the row at
                       $global:CR_PipelineScreen1Rows[$global:CR_PipelineComponentIdx],
                       type the selection letter, press Enter.
@@ -72,74 +71,55 @@
                       name also doubles as the "AfterBack" marker the
                       shared Back_Copy logic checks to know it should
                       expect Screen 1 (not Screen 2) once the F3
-                      completes. Going "next" after a Back doesn't
-                      require a re-scan - F3 lands back on the exact
-                      same page, so the row list captured back in
-                      CompScan_Copy is still valid.
+                      completes.
    CompPage_Action  - send Screen1Select.PageNextToken (e.g. F8) to
                       move to the next page.
    CompPage_Wait    - short delay before copying the new page.
-   CompPage_Copy    - Ctrl+C, check EndOfListText / duplicate-page;
-                      either stop (pipeline complete) or re-parse the
-                      newly-paged text for COB rows (same as
-                      CompScan_Copy, done inline here since the page
-                      was just copied anyway) and keep going from row
+   CompPage_Copy    - Ctrl+C, check EndOfListText / duplicate-page
+                      (still genuinely needs the page's text - that's
+                      the one place content is still read, purely to
+                      know when to STOP paging, never to find rows);
+                      either stop (pipeline complete) or rebuild the
+                      same fixed row-slot list and keep going from row
                       0 of the new page.
 
  $global:CR_PipelineComponentIdx is the 0-based index *into
- $global:CR_PipelineScreen1Rows* (not a raw row-on-page count anymore).
- Both are reset by AutoClipCapture.ps1 whenever the pipeline
- (re)starts, and reset again here every time a new page comes in.
+ $global:CR_PipelineScreen1Rows* (0..RowsPerPage-1, always the same
+ fixed slots). Both are reset by AutoClipCapture.ps1 whenever the
+ pipeline (re)starts, and reset again here every time a new page comes
+ in.
 =====================================================================
 #>
 
-# Scans captured Screen 1 text for every data row that actually has
-# "COB" printed on it, and returns their exact (0-based) line number
-# within $Text and the (0-based) character column "COB" starts at on
-# that specific line.
-#
-# This used to start scanning at a fixed "row 7", on the assumption
-# that real data never appears before that line. That assumption was
-# WRONG for at least one real screen layout, where the true first
-# "COB" row sits earlier than line 7 - so this silently skipped over
-# it (and sometimes the row after it too), making the pipeline treat
-# the 2nd or 3rd real row as if it were the first. \bCOB\b is specific
-# enough that it will never accidentally match the title/"Show
-# Deleted"/column-header/filter text above the real list, so there's
-# no need for a lower bound at all: scan every line from the top of
-# the captured text, and let each line be judged purely on whether it
-# actually has "COB" on it.
-function Get-Screen1DataRows {
-    param([string]$Text, $Screen1Select)
+# Builds the fixed set of row slots for one page - RowsPerPage of
+# them, starting at FirstDataRowLineIndex/SelectionColumnIndex (set
+# once, for real, by CalibrateScreen1Auto.ps1's Ctrl+C-based
+# detection) and stepping one line at a time. No page content is read
+# here at all: every page gets literally the same LineIndex/ColIndex
+# list, because the header above the list is always the same size.
+function Get-Screen1FixedRows {
+    param($Screen1Select)
 
     $rows = New-Object System.Collections.Generic.List[object]
-    if ([string]::IsNullOrEmpty($Text)) { return $rows }
+    $firstLine = [int]$Screen1Select.FirstDataRowLineIndex
+    $col       = [int]$Screen1Select.SelectionColumnIndex
+    $count     = [int]$Screen1Select.RowsPerPage
 
-    $lines = $Text -split "`r`n|`n|`r"
-
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        if (Test-RelayTextContains -Text $line -Needle 'Bottom of List') { break }
-        if (Test-RelayTextContains -Text $line -Needle 'Command ===>')   { break }
-
-        $m = [regex]::Match($line, '\bCOB\b')
-        if (-not $m.Success) { continue }
-
+    for ($i = 0; $i -lt $count; $i++) {
         $rows.Add([pscustomobject]@{
-            LineIndex = $i
-            ColIndex  = $m.Index
+            LineIndex = $firstLine + $i
+            ColIndex  = $col
         })
     }
 
     return $rows
 }
 
-# Works out the on-screen (screen-coordinate) point for one detected
-# row, using the exact same OriginX/OriginY/CharWidthPx/CharHeightPx
-# calibration CalibrateScreen1Auto.ps1 produces - but the row/column
-# themselves now come from Get-Screen1DataRows (the actual detected
-# line and "COB" column for that row) instead of a fixed per-row
-# offset, so drift between rows never accumulates.
+# Works out the on-screen (screen-coordinate) point for one row slot,
+# using the OriginX/OriginY/CharWidthPx/CharHeightPx calibration
+# CalibrateScreen1Auto.ps1 produces, and the LineIndex/ColIndex that
+# Get-Screen1FixedRows generated for that slot (pure arithmetic off
+# FirstDataRowLineIndex/SelectionColumnIndex - not read from content).
 function Get-Screen1RowScreenPoint {
     param(
         [IntPtr]$Handle,
@@ -192,68 +172,23 @@ function Invoke-PipelineScreen1Tick {
     switch ($global:CR_PipelineState) {
 
         'CompScan_Action' {
-            if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0) {
+            if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0 -or $null -eq $s1.FirstDataRowLineIndex -or $null -eq $s1.SelectionColumnIndex) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select isn't calibrated yet - run CalibrateScreen1Auto.bat first. Stopping." -ForegroundColor Red
                 Show-RelayResultOverlay -Text "NOT CALIBRATED - STOPPED" -Color ([System.Drawing.Color]::Red)
                 Stop-PipelineCapture
                 return
             }
 
-            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1) - about to press Ctrl+C to scan for rows"
-            if (Request-PipelineStepConfirm -Description $desc) { return }
-
-            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                Stop-PipelineCapture
-                return
-            }
-
-            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1) - scanning for rows" ([System.Drawing.Color]::Lime)
-            [System.Windows.Forms.SendKeys]::SendWait('^c')
-            $global:CR_PipelineState = 'CompScan_Wait'
+            # Fixed row slots - pure arithmetic, no Ctrl+C/clipboard
+            # read needed at all to find them.
+            $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1
+            $global:CR_PipelineComponentIdx  = 0
+            $global:CR_PipelineState = 'CompZoom_Action'
             $global:CR_ElapsedMs     = 0
         }
 
-        'CompScan_Wait' {
-            $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
-                $text = ''
-                try {
-                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
-                        $text = [System.Windows.Forms.Clipboard]::GetText()
-                    }
-                } catch {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
-                }
-
-                [void](Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name)
-                $rows = Get-Screen1DataRows -Text $text -Screen1Select $s1
-
-                if ($rows.Count -eq 0) {
-                    $global:CR_PipelineScreen1RetryCount++
-                    $maxRetries = [int]$s1.MaxRowRetries
-                    if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] No 'COB' rows found on page $($global:CR_PipelineScreen1PageIdx + 1) after $maxRetries retries - stopping." -ForegroundColor Yellow
-                        Show-RelayResultOverlay -Text "NO ROWS FOUND - STOPPED" -Color ([System.Drawing.Color]::Gray)
-                        Stop-PipelineCapture
-                        return
-                    }
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] No 'COB' rows found yet - retrying scan ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
-                    $global:CR_PipelineState = 'CompScan_Action'
-                    $global:CR_ElapsedMs     = 0
-                    return
-                }
-
-                $global:CR_PipelineScreen1RetryCount = 0
-                $global:CR_PipelineScreen1Rows        = $rows
-                $global:CR_PipelineComponentIdx       = 0
-                $global:CR_PipelineState = 'CompZoom_Action'
-                $global:CR_ElapsedMs     = 0
-            }
-        }
-
         'CompZoom_Action' {
-            if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0) {
+            if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0 -or $null -eq $s1.FirstDataRowLineIndex -or $null -eq $s1.SelectionColumnIndex) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select isn't calibrated yet - run CalibrateScreen1Auto.bat first. Stopping." -ForegroundColor Red
                 Show-RelayResultOverlay -Text "NOT CALIBRATED - STOPPED" -Color ([System.Drawing.Color]::Red)
                 Stop-PipelineCapture
@@ -440,21 +375,12 @@ function Invoke-PipelineScreen1Tick {
                     return
                 }
 
-                # Text was just captured for the duplicate/end-of-list
-                # check above anyway - parse it for COB rows right here
-                # instead of spending a separate CompScan_Action cycle
-                # re-copying the same page again.
-                $rows = Get-Screen1DataRows -Text $text -Screen1Select $s1
-                if ($rows.Count -eq 0) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] New page had no 'COB' rows and no end-of-list/duplicate marker either - stopping to be safe." -ForegroundColor Yellow
-                    Show-RelayResultOverlay -Text "NO ROWS FOUND - STOPPED" -Color ([System.Drawing.Color]::Gray)
-                    Stop-PipelineCapture
-                    return
-                }
-
+                # Text was only needed for the end-of-list/duplicate
+                # check just above - row positions are the same fixed
+                # slots on every page, so just rebuild them directly.
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1PageIdx++
-                $global:CR_PipelineScreen1Rows   = $rows
+                $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1
                 $global:CR_PipelineComponentIdx  = 0
                 $global:CR_PipelineState = 'CompZoom_Action'
                 $global:CR_ElapsedMs     = 0

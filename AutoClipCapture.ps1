@@ -952,7 +952,7 @@ foreach ($p in $PipelineConfigs) {
 # further down) since both call it.
 function Test-Screen1Calibrated {
     param($Screen1Select)
-    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0)
+    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0 -and $null -ne $Screen1Select.FirstDataRowLineIndex -and $null -ne $Screen1Select.SelectionColumnIndex)
 }
 
 # ---- Flag any pipeline whose Screen1Select still has the
