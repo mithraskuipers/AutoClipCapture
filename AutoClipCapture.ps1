@@ -955,34 +955,6 @@ function Test-Screen1Calibrated {
     return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0 -and $null -ne $Screen1Select.FirstDataRowLineIndex -and $null -ne $Screen1Select.SelectionColumnIndex)
 }
 
-# ---- Any pipeline whose Screen1Select still has the uncalibrated
-# 0/0/0/0 (or missing FirstDataRowLineIndex/SelectionColumnIndex)
-# placeholder geometry gets offered calibration RIGHT NOW, at startup -
-# rather than waiting until its hotkey is pressed with the target
-# window possibly not even focused yet. Saying No (or the terminal not
-# being ready) just means you'll be asked again the first time that
-# pipeline's hotkey is actually pressed (Show-Screen1CalibrationPrompt
-# further down handles that case). Make sure the terminal is already
-# open on a REPOSITORY LIST page with a COB row visible before
-# answering Yes here - that's what calibration needs to measure
-# against. ----
-foreach ($p in $PipelineHotkeyMap.Values) {
-    if ($null -ne $p.Screen1Select -and -not (Test-Screen1Calibrated -Screen1Select $p.Screen1Select)) {
-        Write-Host "[AutoClipCapture] [$($p.Name)] Screen1Select isn't calibrated yet." -ForegroundColor Yellow
-        if (Show-Screen1CalibrationPrompt -PipelineName $p.Name) {
-            Write-Host "[AutoClipCapture] [$($p.Name)] Launching Screen1 calibration..." -ForegroundColor Cyan
-            Invoke-Screen1CalibrationNow -Pipeline $p
-            if (Test-Screen1Calibrated -Screen1Select $p.Screen1Select) {
-                Write-Host "[AutoClipCapture] [$($p.Name)] Calibrated." -ForegroundColor Green
-            } else {
-                Write-Host "[AutoClipCapture] [$($p.Name)] Still not calibrated - you'll be asked again when its hotkey is pressed." -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "[AutoClipCapture] [$($p.Name)] Skipped - you'll be asked again when its hotkey is pressed." -ForegroundColor Yellow
-        }
-    }
-}
-
 # ---- Top-left status overlay: a tiny always-on-top banner that never
 # steals keyboard focus (StatusOverlay overrides ShowWithoutActivation
 # and adds WS_EX_NOACTIVATE), so showing/updating it never interrupts
@@ -1528,6 +1500,34 @@ function Invoke-Screen1CalibrationNow {
             $Pipeline.Screen1Select.$fieldName = $freshPipeline.Screen1Select.$fieldName
         } else {
             $Pipeline.Screen1Select | Add-Member -NotePropertyName $fieldName -NotePropertyValue $freshPipeline.Screen1Select.$fieldName -Force
+        }
+    }
+}
+
+# ---- Any pipeline whose Screen1Select still has the uncalibrated
+# 0/0/0/0 (or missing FirstDataRowLineIndex/SelectionColumnIndex)
+# placeholder geometry gets offered calibration RIGHT NOW, at startup -
+# rather than waiting until its hotkey is pressed with the target
+# window possibly not even focused yet. Saying No (or the terminal not
+# being ready) just means you'll be asked again the first time that
+# pipeline's hotkey is actually pressed (Show-Screen1CalibrationPrompt
+# further down handles that case). Make sure the terminal is already
+# open on a REPOSITORY LIST page with a COB row visible before
+# answering Yes here - that's what calibration needs to measure
+# against. ----
+foreach ($p in $PipelineHotkeyMap.Values) {
+    if ($null -ne $p.Screen1Select -and -not (Test-Screen1Calibrated -Screen1Select $p.Screen1Select)) {
+        Write-Host "[AutoClipCapture] [$($p.Name)] Screen1Select isn't calibrated yet." -ForegroundColor Yellow
+        if (Show-Screen1CalibrationPrompt -PipelineName $p.Name) {
+            Write-Host "[AutoClipCapture] [$($p.Name)] Launching Screen1 calibration..." -ForegroundColor Cyan
+            Invoke-Screen1CalibrationNow -Pipeline $p
+            if (Test-Screen1Calibrated -Screen1Select $p.Screen1Select) {
+                Write-Host "[AutoClipCapture] [$($p.Name)] Calibrated." -ForegroundColor Green
+            } else {
+                Write-Host "[AutoClipCapture] [$($p.Name)] Still not calibrated - you'll be asked again when its hotkey is pressed." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "[AutoClipCapture] [$($p.Name)] Skipped - you'll be asked again when its hotkey is pressed." -ForegroundColor Yellow
         }
     }
 }
