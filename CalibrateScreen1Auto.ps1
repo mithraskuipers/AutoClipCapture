@@ -413,14 +413,12 @@ if ($null -eq $cobMatch) {
 }
 Write-Host ("  First 'COB' found at line {0}, column {1}: `"{2}`"" -f $cobMatch.LineIndex, $cobMatch.ColIndex, $cobMatch.LineText.Trim()) -ForegroundColor Cyan
 
-# Confirmed against a real Ctrl+Shift+M run: the line index found above
-# consistently lands one row ABOVE the true first data row - most
-# likely because the Ctrl+C clipboard text's line 0 sits one line
-# below the detected rectangle's visual top edge (OriginY), not
-# exactly at it. Correcting by +1 here (and saving that corrected
-# value below) makes what you see in THIS preview match what the real
-# pipeline will actually click.
-$realLineIndex = $cobMatch.LineIndex + 1
+# NOTE: previously corrected by +1 here on the assumption the raw
+# detected line sits one row ABOVE the true first data row. In
+# practice that made the real pipeline land one row BELOW the true
+# first data row (starting on the second COB row instead of the
+# first), so the raw detected line index is used as-is.
+$realLineIndex = $cobMatch.LineIndex
 
 $targetColIndex = $cobMatch.ColIndex + $clickColumnOffset
 $confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
