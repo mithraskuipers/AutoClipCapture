@@ -130,18 +130,17 @@ function Get-Screen1RowScreenPoint {
 
     $targetColIndex = $ColIndex + [int]$Screen1Select.ClickColumnOffset
 
+    # No manual scaling correction here anymore - this used to multiply
+    # by a percentage typed into a popup at Ctrl+Shift+M start
+    # (Show-ScalingPrompt), completely independent of what
+    # CalibrateScreen1Auto.ps1 measured. That meant a mistyped or
+    # left-over non-100 value here would make every click disagree with
+    # the calibration preview, with nothing to indicate why. Confirmed
+    # DPI-awareness already produces correct real-pixel coordinates
+    # (single monitor, 100% Windows scaling), so this math is now
+    # IDENTICAL to what CalibrateScreen1Auto.ps1's own preview computes.
     $clientX = [double]$Screen1Select.OriginX + ($targetColIndex * [double]$Screen1Select.CharWidthPx)
     $clientY = [double]$Screen1Select.OriginY + ($LineIndex * [double]$Screen1Select.CharHeightPx)
-
-    # ---- Manual display-scaling correction (entered at Ctrl+Shift+M
-    # start via Show-ScalingPrompt in AutoClipCapture.ps1). Screen1Select
-    # was measured from a real-pixel screenshot; if the process actually
-    # sending the click isn't running in that same real-pixel coordinate
-    # space (Windows DPI virtualization), this converts for it. At the
-    # default of 100 this multiplier is exactly 1.0 - a complete no-op. ----
-    $scaleFactor = 100.0 / [double]$global:CR_PipelineScalePercent
-    $clientX = $clientX * $scaleFactor
-    $clientY = $clientY * $scaleFactor
 
     $pt = New-Object POINT
     $pt.X = [int][math]::Round($clientX)
@@ -203,7 +202,7 @@ function Invoke-PipelineScreen1Tick {
             if (-not $global:CR_PipelineStepPending) {
                 $wr = New-Object RECT
                 [void][Win32]::GetWindowRect($global:CR_TargetHandle, [ref]$wr)
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1): LineIndex=$($row.LineIndex) ColIndex=$($row.ColIndex) -> click ($($screenPt.X),$($screenPt.Y))  |  Screen1Select Origin=($($s1.OriginX),$($s1.OriginY)) CharSize=$($s1.CharWidthPx)x$($s1.CharHeightPx)  |  Scaling=$($global:CR_PipelineScalePercent)%  |  Target window bounds ($($wr.Left),$($wr.Top))-($($wr.Right),$($wr.Bottom))" -ForegroundColor DarkGray
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1): LineIndex=$($row.LineIndex) ColIndex=$($row.ColIndex) -> click ($($screenPt.X),$($screenPt.Y))  |  Screen1Select Origin=($($s1.OriginX),$($s1.OriginY)) CharSize=$($s1.CharWidthPx)x$($s1.CharHeightPx)  |  Target window bounds ($($wr.Left),$($wr.Top))-($($wr.Right),$($wr.Bottom))" -ForegroundColor DarkGray
                 if ($screenPt.X -lt $wr.Left -or $screenPt.X -gt $wr.Right -or $screenPt.Y -lt $wr.Top -or $screenPt.Y -gt $wr.Bottom) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] WARNING: that click point is OUTSIDE the target window's bounds - Screen1Select needs recalibrating (CalibrateScreen1Auto.bat)." -ForegroundColor Red
                 }

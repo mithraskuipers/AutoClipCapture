@@ -955,15 +955,31 @@ function Test-Screen1Calibrated {
     return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0 -and $null -ne $Screen1Select.FirstDataRowLineIndex -and $null -ne $Screen1Select.SelectionColumnIndex)
 }
 
-# ---- Flag any pipeline whose Screen1Select still has the
-# uncalibrated 0/0/0/0 placeholder geometry, right at startup - purely
-# informational here (the window to calibrate against may not even be
-# open yet), so it doesn't block. The actual interactive Yes/No gate
-# happens at Ctrl+Shift+M time, once the target window is known - see
-# Show-Screen1CalibrationPrompt in the hotkey handler below. ----
+# ---- Any pipeline whose Screen1Select still has the uncalibrated
+# 0/0/0/0 (or missing FirstDataRowLineIndex/SelectionColumnIndex)
+# placeholder geometry gets offered calibration RIGHT NOW, at startup -
+# rather than waiting until its hotkey is pressed with the target
+# window possibly not even focused yet. Saying No (or the terminal not
+# being ready) just means you'll be asked again the first time that
+# pipeline's hotkey is actually pressed (Show-Screen1CalibrationPrompt
+# further down handles that case). Make sure the terminal is already
+# open on a REPOSITORY LIST page with a COB row visible before
+# answering Yes here - that's what calibration needs to measure
+# against. ----
 foreach ($p in $PipelineHotkeyMap.Values) {
     if ($null -ne $p.Screen1Select -and -not (Test-Screen1Calibrated -Screen1Select $p.Screen1Select)) {
-        Write-Host "[AutoClipCapture] [$($p.Name)] Screen1Select isn't calibrated yet - you'll be asked about it when its hotkey is pressed." -ForegroundColor Yellow
+        Write-Host "[AutoClipCapture] [$($p.Name)] Screen1Select isn't calibrated yet." -ForegroundColor Yellow
+        if (Show-Screen1CalibrationPrompt -PipelineName $p.Name) {
+            Write-Host "[AutoClipCapture] [$($p.Name)] Launching Screen1 calibration..." -ForegroundColor Cyan
+            Invoke-Screen1CalibrationNow -Pipeline $p
+            if (Test-Screen1Calibrated -Screen1Select $p.Screen1Select) {
+                Write-Host "[AutoClipCapture] [$($p.Name)] Calibrated." -ForegroundColor Green
+            } else {
+                Write-Host "[AutoClipCapture] [$($p.Name)] Still not calibrated - you'll be asked again when its hotkey is pressed." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "[AutoClipCapture] [$($p.Name)] Skipped - you'll be asked again when its hotkey is pressed." -ForegroundColor Yellow
+        }
     }
 }
 
@@ -1469,46 +1485,15 @@ function Show-Screen1CalibrationPrompt {
     return ($result -eq $IDYES)
 }
 
-# ---- Asks for the actual Windows display scaling percentage in use
-# for the monitor the terminal is on, so Get-Screen1RowScreenPoint
-# (Screen1.ps1) can apply an explicit, user-controlled correction to
-# every computed click point - independent of, and a way to verify,
-# the automatic SetProcessDpiAwarenessContext call at the very top of
-# this script. 100 is a complete no-op (identity - enter that if you
-# trust the automatic fix). Returns an int; falls back to $Default
-# (unchanged) if the box is cancelled, left blank, or not a positive
-# number. ----
-function Show-ScalingPrompt {
-    param([string]$PipelineName, [int]$Default = 100)
-
-    try {
-        Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
-    } catch {
-        Write-Host "[AutoClipCapture] Couldn't load the scaling input box - continuing with $Default% (no correction)." -ForegroundColor Yellow
-        return $Default
-    }
-
-    $prompt = "Windows display scaling for the monitor '$PipelineName''s terminal is on?" + "`n" + `
-              "(Settings > System > Display > Scale) - common values: 100, 125, 150, 175, 200." + "`n`n" + `
-              "100 = no correction applied (use this if you trust DPI-awareness is already working). Only change this if clicks/the red circle are landing off-target."
-    $answer = [Microsoft.VisualBasic.Interaction]::InputBox($prompt, "Display scaling - $PipelineName", [string]$Default)
-
-    $parsed = 0
-    if ([string]::IsNullOrWhiteSpace($answer) -or -not [int]::TryParse($answer.Trim(), [ref]$parsed) -or $parsed -le 0) {
-        return $Default
-    }
-    return $parsed
-}
-
 # Runs CalibrateScreen1Auto.ps1 to completion (blocking - waits for the
 # user to accept/cancel it), then re-reads AutoClipCaptureConfig.json
 # and copies the fresh OriginX/OriginY/CharWidthPx/CharHeightPx/
-# ClickColumnOffset/CalibrationNote onto the *existing* in-memory
-# $Pipeline.Screen1Select object (matched by pipeline Id) rather than
-# replacing $Pipeline itself - $PipelineHotkeyMap and
-# $global:CR_ActivePipelineConfig hold references to that same object,
-# so calibration takes effect immediately without restarting
-# AutoClipCapture.ps1.
+# ClickColumnOffset/FirstDataRowLineIndex/SelectionColumnIndex/
+# CalibrationNote onto the *existing* in-memory $Pipeline.Screen1Select
+# object (matched by pipeline Id) rather than replacing $Pipeline
+# itself - $PipelineHotkeyMap and $global:CR_ActivePipelineConfig hold
+# references to that same object, so calibration takes effect
+# immediately without restarting AutoClipCapture.ps1.
 function Invoke-Screen1CalibrationNow {
     param($Pipeline)
 
@@ -1538,10 +1523,12 @@ function Invoke-Screen1CalibrationNow {
     $Pipeline.Screen1Select.CharWidthPx      = $freshPipeline.Screen1Select.CharWidthPx
     $Pipeline.Screen1Select.CharHeightPx     = $freshPipeline.Screen1Select.CharHeightPx
     $Pipeline.Screen1Select.ClickColumnOffset = $freshPipeline.Screen1Select.ClickColumnOffset
-    if ($Pipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote') {
-        $Pipeline.Screen1Select.CalibrationNote = $freshPipeline.Screen1Select.CalibrationNote
-    } else {
-        $Pipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $freshPipeline.Screen1Select.CalibrationNote -Force
+    foreach ($fieldName in @('CalibrationNote', 'FirstDataRowLineIndex', 'SelectionColumnIndex')) {
+        if ($Pipeline.Screen1Select.PSObject.Properties.Name -contains $fieldName) {
+            $Pipeline.Screen1Select.$fieldName = $freshPipeline.Screen1Select.$fieldName
+        } else {
+            $Pipeline.Screen1Select | Add-Member -NotePropertyName $fieldName -NotePropertyValue $freshPipeline.Screen1Select.$fieldName -Force
+        }
     }
 }
 
@@ -1776,13 +1763,6 @@ $global:CR_PipelineStepPending     = $false   # true while a queued input is wai
 $global:CR_PipelineStepConfirmed   = $false   # set by the StepConfirmHotkeyId handler, consumed by Request-PipelineStepConfirm
 $global:CR_PipelineStepDescription = ''
 $global:CR_StepHotkeyRegistered    = $false   # whether the Right Arrow hotkey is currently registered (only while a pipeline runs)
-
-# ---- Manual display-scaling override for Screen1 row clicks - see
-# Show-ScalingPrompt (asked at Ctrl+Shift+M start) and
-# Get-Screen1RowScreenPoint in Screen1.ps1, which applies it. 100 =
-# no correction; persists as the pre-filled default across pipeline
-# starts within this running session, purely for convenience. ----
-$global:CR_PipelineScalePercent = 100
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -2338,11 +2318,6 @@ $hotkeyAction = {
                 } else {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibration check skipped by user - attempting to start anyway." -ForegroundColor Yellow
                 }
-            }
-
-            if ($null -ne $pipeline.Screen1Select) {
-                $global:CR_PipelineScalePercent = Show-ScalingPrompt -PipelineName $pipeline.Name -Default $global:CR_PipelineScalePercent
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Display scaling in use for row clicks: $($global:CR_PipelineScalePercent)% (100% = no correction applied)" -ForegroundColor Cyan
             }
 
             Hide-RelayResultOverlay
