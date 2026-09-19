@@ -21,9 +21,11 @@
                             Whatever's typed (extension or not) is only
                             ever used as a base name: the clipboard
                             data gets appended to TWO files every time,
-                            a .txt copy under LogDir\txt and a .cbl
-                            copy under LogDir\cbl, both with identical
-                            content. Cancelling this prompt cancels the
+                            a .txt copy in ..\txt and a .cbl copy in
+                            ..\cbl (the txt and cbl folders right
+                            outside this script's own folder), both
+                            with identical content. Cancelling this
+                            prompt cancels the
                             start (nothing runs).
                        Once running, it repeatedly:
                          1. Brings the selected window to the
@@ -2429,12 +2431,16 @@ $LogDir             = Split-Path -Path $DefaultLogFile -Parent
 $DefaultBaseName    = [System.IO.Path]::GetFileNameWithoutExtension($DefaultLogFile)
 
 # The classic Toggle relay (Ctrl+Shift+P) always saves two copies of
-# whatever it captures - a .txt copy under LogDir\txt and a .cbl copy
-# under LogDir\cbl - regardless of what extension (if any) the person
-# types into the filename prompt. Created up front so they exist even
-# before the first capture starts.
-$TxtDir = Join-Path $LogDir "txt"
-$CblDir = Join-Path $LogDir "cbl"
+# whatever it captures - a .txt copy in ..\txt and a .cbl copy in
+# ..\cbl - regardless of what extension (if any) the person types into
+# the filename prompt. Those are the "txt" and "cbl" folders right
+# OUTSIDE this script's own folder (siblings of it, not subfolders),
+# always resolved from the script's location - not from LogFile, which
+# only decides LogDir (the other output files) and the default base
+# name. GetFullPath collapses the ".." so messages show a clean path.
+# Created up front so they exist even before the first capture starts.
+$TxtDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\txt"))
+$CblDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\cbl"))
 foreach ($d in @($TxtDir, $CblDir)) {
     if (-not (Test-Path -Path $d)) {
         try {
@@ -3813,6 +3819,8 @@ foreach ($hkId in $PipelineHotkeyMap.Keys) {
 }
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
+Write-Host "TXT folder: $TxtDir"
+Write-Host "CBL folder: $CblDir"
 Write-Host "Config:     $ConfigPath"
 if ($SkipRowsStart -gt 0 -or $SkipRowsEnd -gt 0) {
     Write-Host "Row filter: skipping first $SkipRowsStart and last $SkipRowsEnd row(s) of each capture"
@@ -4226,8 +4234,8 @@ $hotkeyAction = {
             #    right away once Enter is pressed. Whatever name (and
             #    whatever extension, if any) is typed here only
             #    supplies the base name - the actual output is always
-            #    two files: <base>.txt under LogDir\txt and
-            #    <base>.cbl under LogDir\cbl.
+            #    two files: <base>.txt in ..\txt and <base>.cbl in
+            #    ..\cbl (the folders just outside the script's folder).
             $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
             if ($null -eq $name) {
                 Write-Host "[AutoClipCapture] Capture start cancelled." -ForegroundColor Yellow
