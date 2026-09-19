@@ -169,10 +169,11 @@
  skip at the start/end of each capture (e.g. to drop a repeated
  header/footer row a target app always copies along with the data),
  and the list of scan Modes - are read from
- AutoClipCaptureConfig.json (same folder as this script). Use AutoClipCaptureConfigGUI.ps1 (or
- the "ConfigureAutoClipCapture.bat" launcher) to change them without
- editing this file. If AutoClipCaptureConfig.json doesn't exist yet, a default
- one is created automatically on first run.
+ AutoClipCaptureConfig.json (same folder as this script). Run this same
+ script with the -EditConfig switch (StartAutoClipCapture.bat EditConfig,
+ or "powershell -STA -File AutoClipCapture.ps1 -EditConfig") to change them
+ in a GUI without hand-editing the file. If AutoClipCaptureConfig.json
+ doesn't exist yet, a default one is created automatically on first run.
 
  IMPORTANT:
    - Must run in STA mode (needed for clipboard access). The
@@ -184,7 +185,1450 @@
 =====================================================================
 #>
 
+<#
+=====================================================================
+ CONSOLIDATION NOTE - read this if you're used to the old multi-file layout
+=====================================================================
+ This single file now contains everything that used to be split across:
+   - AutoClipCapture.ps1                        this script, as before
+   - AutoClipCaptureSqlPipelineScreen1.ps1       now inlined below, in its
+                                                 own clearly marked region
+   - AutoClipCaptureSqlPipelineScreen2.ps1       same
+   - AutoClipCaptureSqlPipelineScreen3.ps1       same
+   - AutoClipCaptureSqlPipelineComponentList.ps1 same
+   - AutoClipCaptureConfigGUI.ps1                now the Show-ConfigEditorGui
+                                                 function below, invoked with
+                                                 the -EditConfig switch
+   - CalibrateScreen1Auto.ps1                    now the
+                                                 Invoke-Screen1CalibrationTool
+                                                 function below, invoked with
+                                                 the -Calibrate switch
+ Only two files are needed now:
+   - AutoClipCapture.ps1        this file
+   - AutoClipCaptureConfig.json settings, unchanged, same format as before
+ ...plus StartAutoClipCapture.bat to launch it. CalibrateScreen1Auto.bat and
+ ConfigureAutoClipCapture.bat are no longer needed either - both jobs now go
+ through StartAutoClipCapture.bat's Calibrate/EditConfig arguments below.
+
+ Run normally (double-click StartAutoClipCapture.bat, or
+ "powershell -STA -File AutoClipCapture.ps1") to start the capture relay/
+ hotkeys exactly as before.
+
+ Run with -EditConfig ("StartAutoClipCapture.bat EditConfig", or
+ "powershell -STA -File AutoClipCapture.ps1 -EditConfig") to open the
+ settings GUI instead - it edits the same AutoClipCaptureConfig.json file
+ and does not start the capture relay.
+
+ Run with -Calibrate ("StartAutoClipCapture.bat Calibrate", or
+ "powershell -STA -File AutoClipCapture.ps1 -Calibrate") to open the Screen1
+ auto-calibration tool instead - same tool AutoClipCapture.ps1 already
+ offers to launch for you when a pipeline isn't calibrated yet, just
+ runnable on demand too. It does not start the capture relay.
+
+ Behavior of every hotkey, pipeline, and setting is unchanged - this was a
+ pure file-layout consolidation, nothing about how the automation runs was
+ touched.
+=====================================================================
+#>
+
+param(
+    # Launch the settings GUI (same editor that used to be
+    # AutoClipCaptureConfigGUI.ps1) instead of starting the capture relay.
+    [switch]$EditConfig,
+
+    # Launch the Screen1 auto-calibration tool (same tool that used to be
+    # CalibrateScreen1Auto.ps1) instead of starting the capture relay. This
+    # is also how AutoClipCapture.ps1 relaunches itself, as a fresh separate
+    # process, when it offers to calibrate an unconfigured pipeline at
+    # startup or via Show-Screen1CalibrationPrompt.
+    [switch]$Calibrate
+)
+
 $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
+
+#=====================================================================
+# region: AutoClipCaptureConfigGUI.ps1 - formerly its own file, now the
+# Show-ConfigEditorGui function below, invoked when this script is run
+# with -EditConfig. Everything inside is unchanged from the standalone
+# version - it's just wrapped in a function now instead of being a
+# top-level script.
+#=====================================================================
+function Show-ConfigEditorGui {
+<#
+=====================================================================
+ AutoClipCaptureConfigGUI.ps1
+=====================================================================
+ GUI for editing AutoClipCaptureConfig.json - the settings file used
+ by AutoClipCapture.ps1. Organized into tabs:
+
+   General           - default log location, the Toggle relay's
+                        action key
+   Timing & Rows      - copy/action delays, internal poll interval,
+                        rows to skip at the start/end of each capture,
+                        the found/not-found result-banner duration
+   Duplicates         - duplicate-capture detection (pause & ask when
+                        back-to-back captures come back almost
+                        identical)
+   Hotkeys            - the Toggle hotkey (start/stop the classic
+                        capture-and-log relay), the Exit hotkey, the
+                        SQL Search hotkey, and the F3 (single press)
+                        hotkey
+
+ The SQL Search scan mode and the F3 single-press action are no longer
+ added/edited from this GUI - only their hotkeys are. Everything else
+ about SQL Search (its action key, the phrases it looks for, etc.) is
+ still read from AutoClipCaptureConfig.json by AutoClipCapture.ps1;
+ edit that file directly if it ever needs to change.
+
+ HOTKEYS (Toggle/Exit/SQL Search/F3) are global shortcuts, so Windows
+ requires at least one modifier (Ctrl/Alt/Shift) - a bare key like
+ "F9" alone isn't accepted for those. A hotkey can also be marked
+ "right-side only", meaning it only fires when the physical RIGHT
+ Ctrl/Alt/Shift key is the one held down (useful if a left-hand combo
+ you use elsewhere would otherwise collide). SQL Search and F3 default
+ to Alt+> and Alt+< and don't require this, since either side's
+ Alt/Shift key works fine for those.
+
+ The Toggle relay's ACTION KEY is different: it's just simulated as a
+ keypress inside the target application, so it can be a single key
+ with no modifier at all (e.g. plain F8), or a modified combo if the
+ target app needs one (e.g. Ctrl+F8).
+
+ Changes only take effect the next time AutoClipCapture.ps1 is started
+ (or restarted) - it reads the config once at launch.
+=====================================================================
+#>
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
+
+# The default "scan mode" bound to Alt+> - see
+# AutoClipCapture.ps1 for the exact loop this describes. Kept identical
+# to (and in sync with) the copy in AutoClipCapture.ps1 so a fresh
+# config looks the same whichever of the two scripts creates it first.
+function Get-DefaultSqlSearchMode {
+    [pscustomobject]@{
+        Id                  = "sql-search"
+        Name                = "SQL Search"
+        Enabled             = $true
+        Hotkey              = [pscustomobject]@{ Modifiers = 5; Key = 0xBE; Display = "Alt+>"; RequireRightModifier = $false }  # Alt+Shift+Period ('>')
+        UseFocusedWindow    = $true
+        ActionKeyToken      = "{F5}"
+        ActionKeyDisplay    = "F5"
+        FoundText           = "EXEC SQL"
+        FoundOverlayText    = "SQL FOUND"
+        NotFoundText        = "No CHARS 'sql' found"
+        TerminalText        = "*Bottom of data reached*"
+        NotFoundOverlayText = "NO SQL FOUND"
+        MaxIterations       = 500
+    }
+}
+
+function Get-DefaultConfig {
+    [pscustomobject]@{
+        LogFile                 = "CapturedOutput.txt"
+        CopyDelayMs             = 150
+        AfterActionKeyDelayMs   = 150
+        TimerTickMs             = 50
+        SkipRowsStart           = 0
+        SkipRowsEnd             = 0
+        ActionKeyDisplay        = "F8"
+        ActionKeyToken          = "{F8}"
+        DupDetectEnabled        = $true
+        DupDetectThreshold      = 0.995
+        ToggleHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C"; RequireRightModifier = $false }
+        ExitHotkey              = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }
+        F3Hotkey                = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }  # Alt+Shift+Comma ('<')
+        ResultOverlayDurationMs = 4000
+        Modes                   = @( Get-DefaultSqlSearchMode )
+    }
+}
+
+# Converts a captured key + modifier bitmask into a SendKeys-compatible
+# token, e.g. F8 -> "{F8}", Ctrl+F8 -> "^({F8})", 'a' -> "a".
+function Convert-KeyToSendKeysToken {
+    param(
+        [Parameter(Mandatory)][int]$Vk,
+        [Parameter(Mandatory)][int]$Mods
+    )
+
+    $key = [System.Windows.Forms.Keys]$Vk
+    $name = $key.ToString()
+
+    $specialMap = @{
+        'Back'        = '{BACKSPACE}'
+        'Tab'         = '{TAB}'
+        'Enter'       = '{ENTER}'
+        'Return'      = '{ENTER}'
+        'Escape'      = '{ESC}'
+        'Space'       = ' '
+        'PageUp'      = '{PGUP}'
+        'Prior'       = '{PGUP}'
+        'PageDown'    = '{PGDN}'
+        'Next'        = '{PGDN}'
+        'End'         = '{END}'
+        'Home'        = '{HOME}'
+        'Left'        = '{LEFT}'
+        'Up'          = '{UP}'
+        'Right'       = '{RIGHT}'
+        'Down'        = '{DOWN}'
+        'Insert'      = '{INSERT}'
+        'Delete'      = '{DELETE}'
+        'Help'        = '{HELP}'
+        'NumLock'     = '{NUMLOCK}'
+        'Scroll'      = '{SCROLLLOCK}'
+        'CapsLock'    = '{CAPSLOCK}'
+        'PrintScreen' = '{PRTSC}'
+        'Pause'       = '{BREAK}'
+        'Add'         = '{ADD}'
+        'Subtract'    = '{SUBTRACT}'
+        'Multiply'    = '{MULTIPLY}'
+        'Divide'      = '{DIVIDE}'
+        'Decimal'     = '{DECIMAL}'
+    }
+
+    if ($name -match '^F([0-9]|1[0-9]|2[0-4])$') {
+        $baseToken = "{$($name.ToUpper())}"
+    }
+    elseif ($name -match '^NumPad(\d)$') {
+        $baseToken = "{NUMPAD$($Matches[1])}"
+    }
+    elseif ($specialMap.ContainsKey($name)) {
+        $baseToken = $specialMap[$name]
+    }
+    elseif ($name -match '^D(\d)$') {
+        $baseToken = $Matches[1]
+    }
+    elseif ($name.Length -eq 1) {
+        $ch = $name.ToLower()
+        if ('+^%~(){}[]' -like "*$ch*") { $baseToken = "{$ch}" } else { $baseToken = $ch }
+    }
+    else {
+        # Best-effort fallback for keys without an explicit mapping above
+        $baseToken = "{$($name.ToUpper())}"
+    }
+
+    $prefix = ""
+    if ($Mods -band 0x0002) { $prefix += '^' }  # Ctrl
+    if ($Mods -band 0x0001) { $prefix += '%' }  # Alt
+    if ($Mods -band 0x0004) { $prefix += '+' }  # Shift
+
+    if ($prefix -eq "") { return $baseToken }
+    return "$prefix($baseToken)"
+}
+
+# Turns a captured System.Windows.Forms.KeyEventArgs into the
+# {Mods,Vk,Display} triple used throughout, honoring whether a
+# modifier is required (hotkeys) or not (action keys).
+function Get-KeyCaptureResult {
+    param(
+        [Parameter(Mandatory)]$EventArgs,
+        [Parameter(Mandatory)][bool]$RequireModifier
+    )
+
+    $modifierKeys = @(
+        [System.Windows.Forms.Keys]::ControlKey,
+        [System.Windows.Forms.Keys]::Menu,
+        [System.Windows.Forms.Keys]::ShiftKey,
+        [System.Windows.Forms.Keys]::LWin,
+        [System.Windows.Forms.Keys]::RWin
+    )
+    if ($modifierKeys -contains $EventArgs.KeyCode) { return $null }  # wait for the real key
+
+    if ($RequireModifier -and -not ($EventArgs.Control -or $EventArgs.Alt -or $EventArgs.Shift)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "A hotkey needs at least one modifier (Ctrl, Alt, and/or Shift). Try again.",
+            "Modifier required", 'OK', 'Warning') | Out-Null
+        return [pscustomobject]@{ Retry = $true }
+    }
+
+    $mods = 0
+    $parts = @()
+    if ($EventArgs.Control) { $mods = $mods -bor 0x0002; $parts += 'Ctrl' }
+    if ($EventArgs.Alt)     { $mods = $mods -bor 0x0001; $parts += 'Alt' }
+    if ($EventArgs.Shift)   { $mods = $mods -bor 0x0004; $parts += 'Shift' }
+
+    $vk = [int]$EventArgs.KeyCode
+    $parts += $EventArgs.KeyCode.ToString()
+    $display = [string]::Join('+', $parts)
+
+    return [pscustomobject]@{ Retry = $false; Mods = $mods; Vk = $vk; Display = $display }
+}
+
+# ------------------------- Load existing config -------------------------
+if (Test-Path $ConfigPath) {
+    try {
+        $existing = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
+    } catch {
+        $existing = Get-DefaultConfig
+    }
+} else {
+    $existing = Get-DefaultConfig
+}
+
+$defaultsForFallback = Get-DefaultConfig
+if (-not ($existing.PSObject.Properties.Name -contains 'ActionKeyToken')) {
+    $existing | Add-Member -NotePropertyName ActionKeyToken   -NotePropertyValue $defaultsForFallback.ActionKeyToken
+    $existing | Add-Member -NotePropertyName ActionKeyDisplay -NotePropertyValue $defaultsForFallback.ActionKeyDisplay
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'AfterActionKeyDelayMs')) {
+    $fallbackDelay = if ($existing.PSObject.Properties.Name -contains 'AfterF8DelayMs') { $existing.AfterF8DelayMs } else { $defaultsForFallback.AfterActionKeyDelayMs }
+    $existing | Add-Member -NotePropertyName AfterActionKeyDelayMs -NotePropertyValue $fallbackDelay
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'SkipRowsStart')) {
+    $existing | Add-Member -NotePropertyName SkipRowsStart -NotePropertyValue $defaultsForFallback.SkipRowsStart
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'SkipRowsEnd')) {
+    $existing | Add-Member -NotePropertyName SkipRowsEnd -NotePropertyValue $defaultsForFallback.SkipRowsEnd
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'DupDetectEnabled')) {
+    $existing | Add-Member -NotePropertyName DupDetectEnabled -NotePropertyValue $defaultsForFallback.DupDetectEnabled
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'DupDetectThreshold')) {
+    $existing | Add-Member -NotePropertyName DupDetectThreshold -NotePropertyValue $defaultsForFallback.DupDetectThreshold
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'ResultOverlayDurationMs')) {
+    $existing | Add-Member -NotePropertyName ResultOverlayDurationMs -NotePropertyValue $defaultsForFallback.ResultOverlayDurationMs
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'Modes') -or $null -eq $existing.Modes) {
+    $existing | Add-Member -NotePropertyName Modes -NotePropertyValue @( Get-DefaultSqlSearchMode ) -Force
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'F3Hotkey') -or $null -eq $existing.F3Hotkey) {
+    $existing | Add-Member -NotePropertyName F3Hotkey -NotePropertyValue $defaultsForFallback.F3Hotkey -Force
+}
+foreach ($hk in @($existing.ToggleHotkey, $existing.ExitHotkey, $existing.F3Hotkey)) {
+    if (-not ($hk.PSObject.Properties.Name -contains 'RequireRightModifier')) {
+        $hk | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
+    }
+}
+foreach ($m in @($existing.Modes)) {
+    if (-not ($m.PSObject.Properties.Name -contains 'UseFocusedWindow')) {
+        $m | Add-Member -NotePropertyName UseFocusedWindow -NotePropertyValue $false -Force
+    }
+    if ($null -ne $m.Hotkey -and -not ($m.Hotkey.PSObject.Properties.Name -contains 'RequireRightModifier')) {
+        $m.Hotkey | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
+    }
+}
+
+# Working, mutable list of Modes. No longer edited from this GUI -
+# kept as-is (aside from the SQL Search hotkey below) and written back
+# unchanged on Save, so AutoClipCapture.ps1 keeps working exactly as
+# before.
+$script:ModesList = New-Object System.Collections.ArrayList
+foreach ($m in @($existing.Modes)) { [void]$script:ModesList.Add($m) }
+
+# The one Mode whose hotkey this GUI still exposes.
+$script:SqlSearchMode = $script:ModesList | Where-Object { $_.Id -eq 'sql-search' } | Select-Object -First 1
+if ($null -eq $script:SqlSearchMode) {
+    $script:SqlSearchMode = Get-DefaultSqlSearchMode
+    [void]$script:ModesList.Add($script:SqlSearchMode)
+}
+
+# Working copies of captured key/hotkey state
+$script:ToggleMods           = [int]$existing.ToggleHotkey.Modifiers
+$script:ToggleKey            = [int]$existing.ToggleHotkey.Key
+$script:ExitMods             = [int]$existing.ExitHotkey.Modifiers
+$script:ExitKey              = [int]$existing.ExitHotkey.Key
+$script:F3Mods               = [int]$existing.F3Hotkey.Modifiers
+$script:F3Key                = [int]$existing.F3Hotkey.Key
+$script:SqlSearchMods        = [int]$script:SqlSearchMode.Hotkey.Modifiers
+$script:SqlSearchKey         = [int]$script:SqlSearchMode.Hotkey.Key
+$script:ActionToken          = [string]$existing.ActionKeyToken
+$script:Capturing            = $null   # $null, 'Toggle', 'Exit', 'SqlSearch', 'F3', or 'Action'
+$script:PreCaptureText       = ""
+
+# ------------------------- Build the main form -----------------------------
+$form                 = New-Object System.Windows.Forms.Form
+$form.Text            = "AutoClipCapture - Configuration"
+$form.ClientSize      = New-Object System.Drawing.Size(470, 515)
+$form.StartPosition   = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox     = $false
+$form.KeyPreview      = $true
+
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Location = New-Object System.Drawing.Point(10, 10)
+$tabs.Size = New-Object System.Drawing.Size(450, 445)
+
+$tabGeneral = New-Object System.Windows.Forms.TabPage; $tabGeneral.Text = "General"
+$tabTiming  = New-Object System.Windows.Forms.TabPage; $tabTiming.Text  = "Timing && Rows"
+$tabDup     = New-Object System.Windows.Forms.TabPage; $tabDup.Text     = "Duplicates"
+$tabKeys    = New-Object System.Windows.Forms.TabPage; $tabKeys.Text    = "Hotkeys"
+$tabs.Controls.AddRange(@($tabGeneral, $tabTiming, $tabDup, $tabKeys))
+
+# ===================== General tab =====================
+$grpLog = New-Object System.Windows.Forms.GroupBox
+$grpLog.Text = "Default log location (you'll be asked for a filename each time you start the Toggle relay)"
+$grpLog.Location = New-Object System.Drawing.Point(10, 10)
+$grpLog.Size = New-Object System.Drawing.Size(415, 60)
+
+$txtLogFile = New-Object System.Windows.Forms.TextBox
+$txtLogFile.Location = New-Object System.Drawing.Point(15, 25)
+$txtLogFile.Size = New-Object System.Drawing.Size(290, 22)
+$txtLogFile.Text = $existing.LogFile
+
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Text = "Browse..."
+$btnBrowse.Location = New-Object System.Drawing.Point(315, 23)
+$btnBrowse.Size = New-Object System.Drawing.Size(85, 25)
+$btnBrowse.Add_Click({
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
+    $sfd.Title = "Choose log file location"
+    $sfd.OverwritePrompt = $false
+    if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtLogFile.Text = $sfd.FileName
+    }
+})
+$grpLog.Controls.AddRange(@($txtLogFile, $btnBrowse))
+
+$grpAction = New-Object System.Windows.Forms.GroupBox
+$grpAction.Text = "Toggle relay's action key (pressed after each Ctrl+C)"
+$grpAction.Location = New-Object System.Drawing.Point(10, 80)
+$grpAction.Size = New-Object System.Drawing.Size(415, 95)
+
+$lblAction = New-Object System.Windows.Forms.Label
+$lblAction.Text = "Key to press:"
+$lblAction.Location = New-Object System.Drawing.Point(15, 28)
+$lblAction.Size = New-Object System.Drawing.Size(140, 20)
+
+$txtAction = New-Object System.Windows.Forms.TextBox
+$txtAction.Location = New-Object System.Drawing.Point(160, 25)
+$txtAction.Size = New-Object System.Drawing.Size(140, 22)
+$txtAction.ReadOnly = $true
+$txtAction.Text = $existing.ActionKeyDisplay
+
+$btnSetAction = New-Object System.Windows.Forms.Button
+$btnSetAction.Text = "Set..."
+$btnSetAction.Location = New-Object System.Drawing.Point(310, 23)
+$btnSetAction.Size = New-Object System.Drawing.Size(85, 25)
+$btnSetAction.Add_Click({
+    $script:Capturing = 'Action'
+    $script:PreCaptureText = $txtAction.Text
+    $txtAction.Text = "Press a key... (Esc to cancel)"
+    $txtAction.BackColor = 'LightYellow'
+})
+
+$lblActionDelay = New-Object System.Windows.Forms.Label
+$lblActionDelay.Text = "Delay after this key, before next Ctrl+C (ms):"
+$lblActionDelay.Location = New-Object System.Drawing.Point(15, 63)
+$lblActionDelay.Size = New-Object System.Drawing.Size(280, 20)
+
+$numAfterActionDelay = New-Object System.Windows.Forms.NumericUpDown
+$numAfterActionDelay.Location = New-Object System.Drawing.Point(310, 60)
+$numAfterActionDelay.Size = New-Object System.Drawing.Size(80, 22)
+$numAfterActionDelay.Minimum = 0
+$numAfterActionDelay.Maximum = 10000
+$numAfterActionDelay.Increment = 10
+$numAfterActionDelay.Value = [int]$existing.AfterActionKeyDelayMs
+
+$grpAction.Controls.AddRange(@($lblAction, $txtAction, $btnSetAction, $lblActionDelay, $numAfterActionDelay))
+
+$lblGeneralHint = New-Object System.Windows.Forms.Label
+$lblGeneralHint.Text = "This action key is only used by the Toggle relay. Each Mode (see the Modes tab) has its own separate action key."
+$lblGeneralHint.Location = New-Object System.Drawing.Point(10, 182)
+$lblGeneralHint.Size = New-Object System.Drawing.Size(415, 30)
+$lblGeneralHint.ForeColor = 'Gray'
+$lblGeneralHint.Font = New-Object System.Drawing.Font($lblGeneralHint.Font.FontFamily, 7.5)
+
+$tabGeneral.Controls.AddRange(@($grpLog, $grpAction, $lblGeneralHint))
+
+# ===================== Timing & Rows tab =====================
+$grpTiming = New-Object System.Windows.Forms.GroupBox
+$grpTiming.Text = "Timing (milliseconds)"
+$grpTiming.Location = New-Object System.Drawing.Point(10, 10)
+$grpTiming.Size = New-Object System.Drawing.Size(415, 85)
+
+$lblCopy = New-Object System.Windows.Forms.Label
+$lblCopy.Text = "Delay after Ctrl+C, before reading clipboard:"
+$lblCopy.Location = New-Object System.Drawing.Point(15, 28)
+$lblCopy.Size = New-Object System.Drawing.Size(280, 20)
+
+$numCopyDelay = New-Object System.Windows.Forms.NumericUpDown
+$numCopyDelay.Location = New-Object System.Drawing.Point(310, 25)
+$numCopyDelay.Size = New-Object System.Drawing.Size(80, 22)
+$numCopyDelay.Minimum = 0
+$numCopyDelay.Maximum = 10000
+$numCopyDelay.Increment = 10
+$numCopyDelay.Value = [int]$existing.CopyDelayMs
+
+$lblTick = New-Object System.Windows.Forms.Label
+$lblTick.Text = "Internal poll interval (advanced):"
+$lblTick.Location = New-Object System.Drawing.Point(15, 55)
+$lblTick.Size = New-Object System.Drawing.Size(280, 20)
+
+$numTimerTick = New-Object System.Windows.Forms.NumericUpDown
+$numTimerTick.Location = New-Object System.Drawing.Point(310, 52)
+$numTimerTick.Size = New-Object System.Drawing.Size(80, 22)
+$numTimerTick.Minimum = 10
+$numTimerTick.Maximum = 1000
+$numTimerTick.Increment = 10
+$numTimerTick.Value = [int]$existing.TimerTickMs
+
+$grpTiming.Controls.AddRange(@($lblCopy, $numCopyDelay, $lblTick, $numTimerTick))
+
+$grpRows = New-Object System.Windows.Forms.GroupBox
+$grpRows.Text = "Row filtering (skip rows in each captured chunk before saving - Toggle relay only)"
+$grpRows.Location = New-Object System.Drawing.Point(10, 105)
+$grpRows.Size = New-Object System.Drawing.Size(415, 90)
+
+$lblSkipStart = New-Object System.Windows.Forms.Label
+$lblSkipStart.Text = "Skip first N rows:"
+$lblSkipStart.Location = New-Object System.Drawing.Point(15, 28)
+$lblSkipStart.Size = New-Object System.Drawing.Size(280, 20)
+
+$numSkipStart = New-Object System.Windows.Forms.NumericUpDown
+$numSkipStart.Location = New-Object System.Drawing.Point(310, 25)
+$numSkipStart.Size = New-Object System.Drawing.Size(80, 22)
+$numSkipStart.Minimum = 0
+$numSkipStart.Maximum = 1000
+$numSkipStart.Increment = 1
+$numSkipStart.Value = [int]$existing.SkipRowsStart
+
+$lblSkipEnd = New-Object System.Windows.Forms.Label
+$lblSkipEnd.Text = "Skip last N rows:"
+$lblSkipEnd.Location = New-Object System.Drawing.Point(15, 58)
+$lblSkipEnd.Size = New-Object System.Drawing.Size(280, 20)
+
+$numSkipEnd = New-Object System.Windows.Forms.NumericUpDown
+$numSkipEnd.Location = New-Object System.Drawing.Point(310, 55)
+$numSkipEnd.Size = New-Object System.Drawing.Size(80, 22)
+$numSkipEnd.Minimum = 0
+$numSkipEnd.Maximum = 1000
+$numSkipEnd.Increment = 1
+$numSkipEnd.Value = [int]$existing.SkipRowsEnd
+
+$grpRows.Controls.AddRange(@($lblSkipStart, $numSkipStart, $lblSkipEnd, $numSkipEnd))
+
+$grpOverlay = New-Object System.Windows.Forms.GroupBox
+$grpOverlay.Text = "SQL Search result banner"
+$grpOverlay.Location = New-Object System.Drawing.Point(10, 200)
+$grpOverlay.Size = New-Object System.Drawing.Size(415, 55)
+
+$lblOverlayDur = New-Object System.Windows.Forms.Label
+$lblOverlayDur.Text = "Show the full-screen found/not-found banner for (ms, 0 = until next action):"
+$lblOverlayDur.Location = New-Object System.Drawing.Point(15, 25)
+$lblOverlayDur.Size = New-Object System.Drawing.Size(310, 20)
+
+$numOverlayDur = New-Object System.Windows.Forms.NumericUpDown
+$numOverlayDur.Location = New-Object System.Drawing.Point(330, 22)
+$numOverlayDur.Size = New-Object System.Drawing.Size(70, 22)
+$numOverlayDur.Minimum = 0
+$numOverlayDur.Maximum = 60000
+$numOverlayDur.Increment = 500
+$numOverlayDur.Value = [Math]::Min([Math]::Max([int]$existing.ResultOverlayDurationMs, 0), 60000)
+
+$grpOverlay.Controls.AddRange(@($lblOverlayDur, $numOverlayDur))
+
+$tabTiming.Controls.AddRange(@($grpTiming, $grpRows, $grpOverlay))
+
+# ===================== Duplicates tab =====================
+$grpDup = New-Object System.Windows.Forms.GroupBox
+$grpDup.Text = "Duplicate-capture detection (Toggle relay only)"
+$grpDup.Location = New-Object System.Drawing.Point(10, 10)
+$grpDup.Size = New-Object System.Drawing.Size(415, 80)
+
+$chkDupDetect = New-Object System.Windows.Forms.CheckBox
+$chkDupDetect.Text = "Pause and ask when back-to-back captures are nearly identical"
+$chkDupDetect.Location = New-Object System.Drawing.Point(15, 25)
+$chkDupDetect.Size = New-Object System.Drawing.Size(390, 20)
+$chkDupDetect.Checked = [bool]$existing.DupDetectEnabled
+
+$lblDupThreshold = New-Object System.Windows.Forms.Label
+$lblDupThreshold.Text = "Similarity threshold to trigger the pause (%):"
+$lblDupThreshold.Location = New-Object System.Drawing.Point(15, 53)
+$lblDupThreshold.Size = New-Object System.Drawing.Size(280, 20)
+
+$numDupThreshold = New-Object System.Windows.Forms.NumericUpDown
+$numDupThreshold.Location = New-Object System.Drawing.Point(310, 50)
+$numDupThreshold.Size = New-Object System.Drawing.Size(80, 22)
+$numDupThreshold.DecimalPlaces = 2
+$numDupThreshold.Minimum = 50
+$numDupThreshold.Maximum = 100
+$numDupThreshold.Increment = 0.1
+$rawThreshold = [double]$existing.DupDetectThreshold
+if ($rawThreshold -le 1) { $rawThreshold = $rawThreshold * 100 }
+$numDupThreshold.Value = [Math]::Round([Math]::Min([Math]::Max($rawThreshold, 50), 100), 2)
+
+$lblDupThreshold.Enabled = $chkDupDetect.Checked
+$numDupThreshold.Enabled = $chkDupDetect.Checked
+$chkDupDetect.Add_CheckedChanged({
+    $lblDupThreshold.Enabled = $chkDupDetect.Checked
+    $numDupThreshold.Enabled = $chkDupDetect.Checked
+})
+
+$grpDup.Controls.AddRange(@($chkDupDetect, $lblDupThreshold, $numDupThreshold))
+$tabDup.Controls.Add($grpDup)
+
+# ===================== Hotkeys tab =====================
+$grpKeys = New-Object System.Windows.Forms.GroupBox
+$grpKeys.Text = "Global hotkeys (need at least one modifier)"
+$grpKeys.Location = New-Object System.Drawing.Point(10, 10)
+$grpKeys.Size = New-Object System.Drawing.Size(415, 200)
+
+$lblToggle = New-Object System.Windows.Forms.Label
+$lblToggle.Text = "Start / stop Toggle relay:"
+$lblToggle.Location = New-Object System.Drawing.Point(15, 25)
+$lblToggle.Size = New-Object System.Drawing.Size(150, 20)
+
+$txtToggle = New-Object System.Windows.Forms.TextBox
+$txtToggle.Location = New-Object System.Drawing.Point(170, 22)
+$txtToggle.Size = New-Object System.Drawing.Size(140, 22)
+$txtToggle.ReadOnly = $true
+$txtToggle.Text = $existing.ToggleHotkey.Display
+
+$btnSetToggle = New-Object System.Windows.Forms.Button
+$btnSetToggle.Text = "Set..."
+$btnSetToggle.Location = New-Object System.Drawing.Point(325, 20)
+$btnSetToggle.Size = New-Object System.Drawing.Size(85, 25)
+$btnSetToggle.Add_Click({
+    $script:Capturing = 'Toggle'
+    $script:PreCaptureText = $txtToggle.Text
+    $txtToggle.Text = "Press keys... (Esc to cancel)"
+    $txtToggle.BackColor = 'LightYellow'
+})
+
+$lblExit = New-Object System.Windows.Forms.Label
+$lblExit.Text = "Quit AutoClipCapture:"
+$lblExit.Location = New-Object System.Drawing.Point(15, 55)
+$lblExit.Size = New-Object System.Drawing.Size(150, 20)
+
+$txtExit = New-Object System.Windows.Forms.TextBox
+$txtExit.Location = New-Object System.Drawing.Point(170, 52)
+$txtExit.Size = New-Object System.Drawing.Size(140, 22)
+$txtExit.ReadOnly = $true
+$txtExit.Text = $existing.ExitHotkey.Display
+
+$btnSetExit = New-Object System.Windows.Forms.Button
+$btnSetExit.Text = "Set..."
+$btnSetExit.Location = New-Object System.Drawing.Point(325, 50)
+$btnSetExit.Size = New-Object System.Drawing.Size(85, 25)
+$btnSetExit.Add_Click({
+    $script:Capturing = 'Exit'
+    $script:PreCaptureText = $txtExit.Text
+    $txtExit.Text = "Press keys... (Esc to cancel)"
+    $txtExit.BackColor = 'LightYellow'
+})
+
+$lblSqlSearch = New-Object System.Windows.Forms.Label
+$lblSqlSearch.Text = "SQL Search (repeats F5, watches clipboard):"
+$lblSqlSearch.Location = New-Object System.Drawing.Point(15, 85)
+$lblSqlSearch.Size = New-Object System.Drawing.Size(230, 20)
+
+$txtSqlSearch = New-Object System.Windows.Forms.TextBox
+$txtSqlSearch.Location = New-Object System.Drawing.Point(170, 82)
+$txtSqlSearch.Size = New-Object System.Drawing.Size(140, 22)
+$txtSqlSearch.ReadOnly = $true
+$txtSqlSearch.Text = $script:SqlSearchMode.Hotkey.Display
+
+$btnSetSqlSearch = New-Object System.Windows.Forms.Button
+$btnSetSqlSearch.Text = "Set..."
+$btnSetSqlSearch.Location = New-Object System.Drawing.Point(325, 80)
+$btnSetSqlSearch.Size = New-Object System.Drawing.Size(85, 25)
+$btnSetSqlSearch.Add_Click({
+    $script:Capturing = 'SqlSearch'
+    $script:PreCaptureText = $txtSqlSearch.Text
+    $txtSqlSearch.Text = "Press keys... (Esc to cancel)"
+    $txtSqlSearch.BackColor = 'LightYellow'
+})
+
+$chkSqlSearchRight = New-Object System.Windows.Forms.CheckBox
+$chkSqlSearchRight.Text = "Require RIGHT-hand Ctrl/Alt/Shift"
+$chkSqlSearchRight.Location = New-Object System.Drawing.Point(170, 108)
+$chkSqlSearchRight.Size = New-Object System.Drawing.Size(240, 20)
+$chkSqlSearchRight.Checked = [bool]$script:SqlSearchMode.Hotkey.RequireRightModifier
+
+$lblF3 = New-Object System.Windows.Forms.Label
+$lblF3.Text = "F3 (single press, focused window):"
+$lblF3.Location = New-Object System.Drawing.Point(15, 140)
+$lblF3.Size = New-Object System.Drawing.Size(230, 20)
+
+$txtF3 = New-Object System.Windows.Forms.TextBox
+$txtF3.Location = New-Object System.Drawing.Point(170, 137)
+$txtF3.Size = New-Object System.Drawing.Size(140, 22)
+$txtF3.ReadOnly = $true
+$txtF3.Text = $existing.F3Hotkey.Display
+
+$btnSetF3 = New-Object System.Windows.Forms.Button
+$btnSetF3.Text = "Set..."
+$btnSetF3.Location = New-Object System.Drawing.Point(325, 135)
+$btnSetF3.Size = New-Object System.Drawing.Size(85, 25)
+$btnSetF3.Add_Click({
+    $script:Capturing = 'F3'
+    $script:PreCaptureText = $txtF3.Text
+    $txtF3.Text = "Press keys... (Esc to cancel)"
+    $txtF3.BackColor = 'LightYellow'
+})
+
+$chkF3Right = New-Object System.Windows.Forms.CheckBox
+$chkF3Right.Text = "Require RIGHT-hand Ctrl/Alt/Shift"
+$chkF3Right.Location = New-Object System.Drawing.Point(170, 163)
+$chkF3Right.Size = New-Object System.Drawing.Size(240, 20)
+$chkF3Right.Checked = [bool]$existing.F3Hotkey.RequireRightModifier
+
+$grpKeys.Controls.AddRange(@(
+    $lblToggle, $txtToggle, $btnSetToggle,
+    $lblExit, $txtExit, $btnSetExit,
+    $lblSqlSearch, $txtSqlSearch, $btnSetSqlSearch, $chkSqlSearchRight,
+    $lblF3, $txtF3, $btnSetF3, $chkF3Right
+))
+
+$lblHint = New-Object System.Windows.Forms.Label
+$lblHint.Text = "Hold Ctrl/Alt/Shift (any combination) and press a key. ""Right-hand"" hotkeys only fire when that physical side of the modifier is held."
+$lblHint.Location = New-Object System.Drawing.Point(10, 215)
+$lblHint.Size = New-Object System.Drawing.Size(415, 30)
+$lblHint.Font = New-Object System.Drawing.Font($lblHint.Font.FontFamily, 7.5)
+$lblHint.ForeColor = 'Gray'
+
+$tabKeys.Controls.AddRange(@($grpKeys, $lblHint))
+
+
+# --- Bottom buttons ---
+$btnSave = New-Object System.Windows.Forms.Button
+$btnSave.Text = "Save"
+$btnSave.Location = New-Object System.Drawing.Point(185, 465)
+$btnSave.Size = New-Object System.Drawing.Size(100, 32)
+
+$btnDefaults = New-Object System.Windows.Forms.Button
+$btnDefaults.Text = "Reset to Defaults"
+$btnDefaults.Location = New-Object System.Drawing.Point(10, 465)
+$btnDefaults.Size = New-Object System.Drawing.Size(130, 32)
+
+$btnCancel = New-Object System.Windows.Forms.Button
+$btnCancel.Text = "Cancel"
+$btnCancel.Location = New-Object System.Drawing.Point(310, 465)
+$btnCancel.Size = New-Object System.Drawing.Size(100, 32)
+
+$btnDefaults.Add_Click({
+    $defaults = Get-DefaultConfig
+    $txtLogFile.Text           = $defaults.LogFile
+    $txtAction.Text            = $defaults.ActionKeyDisplay
+    $numAfterActionDelay.Value = $defaults.AfterActionKeyDelayMs
+    $numCopyDelay.Value        = $defaults.CopyDelayMs
+    $numTimerTick.Value        = $defaults.TimerTickMs
+    $numSkipStart.Value        = $defaults.SkipRowsStart
+    $numSkipEnd.Value          = $defaults.SkipRowsEnd
+    $chkDupDetect.Checked      = $defaults.DupDetectEnabled
+    $numDupThreshold.Value     = [Math]::Round($defaults.DupDetectThreshold * 100, 2)
+    $txtToggle.Text            = $defaults.ToggleHotkey.Display
+    $txtExit.Text              = $defaults.ExitHotkey.Display
+    $script:ToggleMods         = [int]$defaults.ToggleHotkey.Modifiers
+    $script:ToggleKey          = [int]$defaults.ToggleHotkey.Key
+    $script:ExitMods           = [int]$defaults.ExitHotkey.Modifiers
+    $script:ExitKey            = [int]$defaults.ExitHotkey.Key
+    $script:ActionToken        = $defaults.ActionKeyToken
+    $numOverlayDur.Value       = $defaults.ResultOverlayDurationMs
+
+    $defaultSqlSearch          = @($defaults.Modes) | Where-Object { $_.Id -eq 'sql-search' } | Select-Object -First 1
+    $txtSqlSearch.Text         = $defaultSqlSearch.Hotkey.Display
+    $chkSqlSearchRight.Checked = [bool]$defaultSqlSearch.Hotkey.RequireRightModifier
+    $script:SqlSearchMods      = [int]$defaultSqlSearch.Hotkey.Modifiers
+    $script:SqlSearchKey       = [int]$defaultSqlSearch.Hotkey.Key
+    $script:SqlSearchMode.Hotkey = [pscustomobject]@{ Modifiers = $script:SqlSearchMods; Key = $script:SqlSearchKey; Display = $txtSqlSearch.Text; RequireRightModifier = $chkSqlSearchRight.Checked }
+    $script:SqlSearchMode.UseFocusedWindow = [bool]$defaultSqlSearch.UseFocusedWindow
+
+    $txtF3.Text                = $defaults.F3Hotkey.Display
+    $chkF3Right.Checked        = [bool]$defaults.F3Hotkey.RequireRightModifier
+    $script:F3Mods             = [int]$defaults.F3Hotkey.Modifiers
+    $script:F3Key              = [int]$defaults.F3Hotkey.Key
+})
+
+$btnCancel.Add_Click({ $form.Close() })
+
+$btnSave.Add_Click({
+    if ([string]::IsNullOrWhiteSpace($txtLogFile.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Please specify a log file path.", "Missing Log File", 'OK', 'Warning') | Out-Null
+        return
+    }
+
+    # Collect every hotkey (Toggle, Exit, SQL Search, F3) and make sure
+    # none of them collide.
+    $allHotkeys = New-Object System.Collections.ArrayList
+    [void]$allHotkeys.Add([pscustomobject]@{ Name = "Toggle relay"; Mods = $script:ToggleMods;    Key = $script:ToggleKey })
+    [void]$allHotkeys.Add([pscustomobject]@{ Name = "Exit";         Mods = $script:ExitMods;      Key = $script:ExitKey })
+    [void]$allHotkeys.Add([pscustomobject]@{ Name = "SQL Search";   Mods = $script:SqlSearchMods; Key = $script:SqlSearchKey })
+    [void]$allHotkeys.Add([pscustomobject]@{ Name = "F3";           Mods = $script:F3Mods;        Key = $script:F3Key })
+    foreach ($m in $script:ModesList) {
+        if ($m.Id -eq 'sql-search') { continue }   # already covered above with its live edited value
+        if ($m.Enabled) {
+            [void]$allHotkeys.Add([pscustomobject]@{ Name = "Mode '$($m.Name)'"; Mods = [int]$m.Hotkey.Modifiers; Key = [int]$m.Hotkey.Key })
+        }
+    }
+    for ($i = 0; $i -lt $allHotkeys.Count; $i++) {
+        for ($j = $i + 1; $j -lt $allHotkeys.Count; $j++) {
+            if ($allHotkeys[$i].Mods -eq $allHotkeys[$j].Mods -and $allHotkeys[$i].Key -eq $allHotkeys[$j].Key) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "$($allHotkeys[$i].Name) and $($allHotkeys[$j].Name) are both set to the same hotkey. Please give each one a different combination.",
+                    "Duplicate Hotkey", 'OK', 'Warning') | Out-Null
+                return
+            }
+        }
+    }
+
+    # Apply the (possibly edited) SQL Search hotkey to its mode entry
+    # before writing Modes back out - everything else about that mode
+    # (action key, phrases, etc.) is preserved untouched.
+    $script:SqlSearchMode.Hotkey = [pscustomobject]@{
+        Modifiers             = $script:SqlSearchMods
+        Key                   = $script:SqlSearchKey
+        Display               = $txtSqlSearch.Text
+        RequireRightModifier  = [bool]$chkSqlSearchRight.Checked
+    }
+
+    $modesForSave = @()
+    foreach ($m in $script:ModesList) {
+        $modesForSave += [pscustomobject]@{
+            Id                  = $m.Id
+            Name                = $m.Name
+            Enabled             = [bool]$m.Enabled
+            Hotkey              = [pscustomobject]@{ Modifiers = [int]$m.Hotkey.Modifiers; Key = [int]$m.Hotkey.Key; Display = [string]$m.Hotkey.Display; RequireRightModifier = [bool]$m.Hotkey.RequireRightModifier }
+            UseFocusedWindow    = [bool]$m.UseFocusedWindow
+            ActionKeyToken      = [string]$m.ActionKeyToken
+            ActionKeyDisplay    = [string]$m.ActionKeyDisplay
+            FoundText           = [string]$m.FoundText
+            FoundOverlayText    = [string]$m.FoundOverlayText
+            NotFoundText        = [string]$m.NotFoundText
+            TerminalText        = [string]$m.TerminalText
+            NotFoundOverlayText = [string]$m.NotFoundOverlayText
+            MaxIterations       = [int]$m.MaxIterations
+        }
+    }
+
+    $newConfig = [pscustomobject]@{
+        LogFile                 = $txtLogFile.Text
+        CopyDelayMs              = [int]$numCopyDelay.Value
+        AfterActionKeyDelayMs    = [int]$numAfterActionDelay.Value
+        TimerTickMs              = [int]$numTimerTick.Value
+        SkipRowsStart            = [int]$numSkipStart.Value
+        SkipRowsEnd              = [int]$numSkipEnd.Value
+        ActionKeyDisplay         = $txtAction.Text
+        ActionKeyToken           = $script:ActionToken
+        DupDetectEnabled         = [bool]$chkDupDetect.Checked
+        DupDetectThreshold       = [double]($numDupThreshold.Value / 100)
+        ToggleHotkey             = [pscustomobject]@{ Modifiers = $script:ToggleMods; Key = $script:ToggleKey; Display = $txtToggle.Text; RequireRightModifier = $false }
+        ExitHotkey               = [pscustomobject]@{ Modifiers = $script:ExitMods;   Key = $script:ExitKey;   Display = $txtExit.Text;   RequireRightModifier = $false }
+        F3Hotkey                 = [pscustomobject]@{ Modifiers = $script:F3Mods;     Key = $script:F3Key;     Display = $txtF3.Text;     RequireRightModifier = [bool]$chkF3Right.Checked }
+        ResultOverlayDurationMs  = [int]$numOverlayDur.Value
+        Modes                    = $modesForSave
+        # Pipelines aren't edited by this GUI (see the header comment
+        # in AutoClipCapture.ps1) - carry whatever was already in the
+        # file straight through so saving settings here can't silently
+        # delete them.
+        Pipelines                = if ($existing.PSObject.Properties.Name -contains 'Pipelines') { $existing.Pipelines } else { @() }
+    }
+
+    $newConfig | ConvertTo-Json -Depth 6 | Set-Content -Path $ConfigPath -Encoding UTF8
+
+    [System.Windows.Forms.MessageBox]::Show(
+        "Configuration saved to:`n$ConfigPath`n`nRestart AutoClipCapture for the changes to take effect.",
+        "Saved", 'OK', 'Information') | Out-Null
+})
+
+$form.Controls.AddRange(@($tabs, $btnSave, $btnDefaults, $btnCancel))
+
+# ------------------------- Key-combo capture (main form: Toggle/Exit/SqlSearch/F3/Action) ---------------------------
+$form.Add_KeyDown({
+    param($sender, $e)
+
+    if (-not $script:Capturing) { return }
+
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+        switch ($script:Capturing) {
+            'Toggle'    { $txtToggle.Text    = $script:PreCaptureText; $txtToggle.BackColor    = 'Window' }
+            'Exit'      { $txtExit.Text      = $script:PreCaptureText; $txtExit.BackColor      = 'Window' }
+            'SqlSearch' { $txtSqlSearch.Text = $script:PreCaptureText; $txtSqlSearch.BackColor = 'Window' }
+            'F3'        { $txtF3.Text        = $script:PreCaptureText; $txtF3.BackColor        = 'Window' }
+            'Action'    { $txtAction.Text    = $script:PreCaptureText; $txtAction.BackColor    = 'Window' }
+        }
+        $script:Capturing = $null
+        $e.Handled = $true
+        $e.SuppressKeyPress = $true
+        return
+    }
+
+    $requireMod = ($script:Capturing -ne 'Action')
+    $captured = Get-KeyCaptureResult -EventArgs $e -RequireModifier $requireMod
+    if ($null -eq $captured) {
+        $e.Handled = $true; $e.SuppressKeyPress = $true; return   # pure modifier press - keep waiting
+    }
+    if ($captured.Retry) {
+        $e.Handled = $true; $e.SuppressKeyPress = $true; return   # needs a modifier - message already shown
+    }
+
+    switch ($script:Capturing) {
+        'Toggle' {
+            $script:ToggleMods = $captured.Mods
+            $script:ToggleKey  = $captured.Vk
+            $txtToggle.Text = $captured.Display
+            $txtToggle.BackColor = 'Window'
+        }
+        'Exit' {
+            $script:ExitMods = $captured.Mods
+            $script:ExitKey  = $captured.Vk
+            $txtExit.Text = $captured.Display
+            $txtExit.BackColor = 'Window'
+        }
+        'SqlSearch' {
+            $script:SqlSearchMods = $captured.Mods
+            $script:SqlSearchKey  = $captured.Vk
+            $txtSqlSearch.Text = $captured.Display
+            $txtSqlSearch.BackColor = 'Window'
+        }
+        'F3' {
+            $script:F3Mods = $captured.Mods
+            $script:F3Key  = $captured.Vk
+            $txtF3.Text = $captured.Display
+            $txtF3.BackColor = 'Window'
+        }
+        'Action' {
+            $script:ActionToken = Convert-KeyToSendKeysToken -Vk $captured.Vk -Mods $captured.Mods
+            $txtAction.Text = $captured.Display
+            $txtAction.BackColor = 'Window'
+        }
+    }
+
+    $script:Capturing = $null
+    $e.Handled = $true
+    $e.SuppressKeyPress = $true
+})
+
+[System.Windows.Forms.Application]::Run($form)
+}
+# endregion: AutoClipCaptureConfigGUI.ps1
+#=====================================================================
+
+#=====================================================================
+# region: CalibrateScreen1Auto.ps1 - formerly its own file, now the
+# Invoke-Screen1CalibrationTool function below, invoked when this script
+# is run with -Calibrate. Everything inside is unchanged from the
+# standalone version - it's just wrapped in a function now instead of
+# being a top-level script. Like the standalone version, it's meant to
+# run as its own dedicated process (see the -Calibrate dispatch above and
+# Invoke-Screen1CalibrationNow below, which is what actually launches it) -
+# it reads/writes the console directly (Read-Host, Console.ReadKey, pause)
+# and calls exit on its own error paths, which is exactly right for a
+# standalone process but would be wrong if it ran inline inside the
+# capture relay's own process.
+#=====================================================================
+function Invoke-Screen1CalibrationTool {
+<#
+=====================================================================
+ CalibrateScreen1Auto.ps1
+
+ Automatic replacement for CalibrateScreen1AutoGuided.ps1's manual
+ "nudge with arrow keys until it looks right" steps.
+
+ WHY THIS IS POSSIBLE: the terminal itself renders as a solid black
+ rectangle sitting inside a visibly lighter window (menu bar, icon
+ toolbar, status bar - see your own screenshots). That contrast is
+ detectable in a screenshot. So instead of asking you to judge pixel
+ alignment by eye, this script:
+   1. Takes a screenshot of exactly the target window's client area
+      (Graphics.CopyFromScreen - the window must be visible on top,
+      not covered by another window, while this runs).
+   2. Scans it row by row and column by column for the largest solid
+      dark rectangle - that's the terminal grid, as opposed to the
+      lighter menu/toolbar/status-bar chrome around it.
+   3. Divides that rectangle's pixel width/height by the known fixed
+      grid (80 columns x 32 rows) to get CharWidthPx/CharHeightPx -
+      measured from the ACTUAL terminal area only, unlike
+      CalibrateScreen1AutoGuided.ps1's original approach of dividing
+      the WHOLE window client area by 80x32 (which silently counted
+      the menu/toolbar/status-bar height as if it were extra terminal
+      rows, and produced a CharHeightPx that was too small - accurate
+      only right at the one manually-nudged row, and increasingly off
+      moving down the page).
+   4. Works out OriginX/OriginY from that rectangle's actual top-left
+      corner.
+   5. Copies the CURRENT screen (Ctrl+C) and finds the real first line
+      with "COB" printed on it - ONCE. That line/column becomes
+      FirstDataRowLineIndex/SelectionColumnIndex, saved into
+      Screen1Select permanently. The real pipeline
+      (AutoClipCaptureSqlPipelineScreen1.ps1) no longer reads page
+      content at all to find rows - every row on every page is now
+      pure arithmetic from these saved numbers (row N = first row +
+      N x CharHeightPx). This only works because the header above the
+      list is always exactly the same size - if that's not true for
+      your screens, this whole approach isn't safe to use.
+   6. Shows you the result and moves the mouse to the computed point
+      for ONE quick look - press Enter to accept, Esc to cancel
+      (nothing is saved on cancel; CalibrateScreen1AutoGuided.ps1 is
+      still there as a manual fallback if detection ever gets it
+      wrong, e.g. a non-black terminal color scheme).
+
+ NOTE: make sure the terminal is showing a REPOSITORY LIST page with
+ at least one visible "COB" row before running this - step 5 needs
+ real COB text on screen to calibrate against, this one time.
+
+ Run it via "StartAutoClipCapture.bat Calibrate", via the -Calibrate
+ switch ("powershell -STA -File AutoClipCapture.ps1 -Calibrate"), or
+ let AutoClipCapture.ps1 launch it for you when it offers to calibrate
+ an unconfigured pipeline.
+=====================================================================
+#>
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# ---- Make THIS PROCESS DPI-aware before the screenshot/coordinate
+# code below runs - MUST match AutoClipCapture.ps1's own DPI-awareness
+# call exactly, or the two scripts will disagree about what a pixel
+# is and every click will drift off by the display scaling percentage.
+# See the matching comment at the top of AutoClipCapture.ps1 for why.
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class CR_DpiAwareness {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    [DllImport("shcore.dll")]
+    public static extern int SetProcessDpiAwareness(int value);
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+}
+"@ -ErrorAction SilentlyContinue
+
+    $perMonitorV2 = [IntPtr](-4)
+    $setDpi = $false
+    try { $setDpi = [CR_DpiAwareness]::SetProcessDpiAwarenessContext($perMonitorV2) } catch {}
+    if (-not $setDpi) {
+        try { [void][CR_DpiAwareness]::SetProcessDpiAwareness(2) } catch {}
+        try { [void][CR_DpiAwareness]::SetProcessDPIAware() } catch {}
+    }
+} catch {
+    Write-Host "Could not set DPI awareness - if Windows display scaling isn't 100%, calibration will be off. $_" -ForegroundColor Yellow
+}
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Collections.Generic;
+
+public struct POINT2 { public int X; public int Y; }
+public struct RECT2 { public int Left; public int Top; public int Right; public int Bottom; }
+
+public static class CalibNative4
+{
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT2 lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT2 lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    public static List<KeyValuePair<IntPtr,string>> GetVisibleWindows()
+    {
+        var list = new List<KeyValuePair<IntPtr,string>>();
+        EnumWindows((hWnd, lParam) =>
+        {
+            if (IsWindowVisible(hWnd))
+            {
+                int len = GetWindowTextLength(hWnd);
+                if (len > 0)
+                {
+                    var sb = new StringBuilder(len + 1);
+                    GetWindowText(hWnd, sb, sb.Capacity + 1);
+                    string title = sb.ToString();
+                    if (!string.IsNullOrWhiteSpace(title))
+                    {
+                        list.Add(new KeyValuePair<IntPtr,string>(hWnd, title));
+                    }
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return list;
+    }
+}
+"@
+
+# A row/column counts as "terminal" if at least this fraction of its
+# pixels are dark. The terminal's black background dominates even rows
+# full of bright text; menu/toolbar/status-bar rows are mostly light
+# with only a little dark text/icon detail, so they score far lower.
+$DarkFraction   = 0.40
+$DarkThreshold  = 40   # average of R,G,B below this counts as "dark"
+
+function Get-WindowScreenshot {
+    param([IntPtr]$Handle)
+
+    $rect = New-Object RECT2
+    [void][CalibNative4]::GetClientRect($Handle, [ref]$rect)
+    $w = $rect.Right - $rect.Left
+    $h = $rect.Bottom - $rect.Top
+    if ($w -le 0 -or $h -le 0) { return $null }
+
+    $topLeft = New-Object POINT2
+    $topLeft.X = 0; $topLeft.Y = 0
+    [void][CalibNative4]::ClientToScreen($Handle, [ref]$topLeft)
+
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($topLeft.X, $topLeft.Y, 0, 0, (New-Object System.Drawing.Size($w, $h)))
+    $g.Dispose()
+    return $bmp
+}
+
+# Returns @{ Left; Top; Right; Bottom } (exclusive) of the largest solid
+# dark rectangle in the bitmap, using fast LockBits byte access rather
+# than the (very slow, one-call-per-pixel) Bitmap.GetPixel.
+function Find-DarkRectangle {
+    param([System.Drawing.Bitmap]$Bmp)
+
+    $w = $Bmp.Width
+    $h = $Bmp.Height
+    $rectFull = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+    $bmpData = $Bmp.LockBits($rectFull, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+
+    $bytes = New-Object byte[] ($bmpData.Stride * $h)
+    [System.Runtime.InteropServices.Marshal]::Copy($bmpData.Scan0, $bytes, 0, $bytes.Length)
+    $Bmp.UnlockBits($bmpData)
+    $stride = $bmpData.Stride
+
+    # ---- Per-row dark fraction -> largest contiguous "dark" row band ----
+    $rowDark = New-Object bool[] $h
+    for ($y = 0; $y -lt $h; $y++) {
+        $darkCount = 0
+        $rowOffset = $y * $stride
+        for ($x = 0; $x -lt $w; $x++) {
+            $px = $rowOffset + ($x * 4)
+            $b = $bytes[$px]; $gr = $bytes[$px + 1]; $r = $bytes[$px + 2]
+            if ((([int]$r + [int]$gr + [int]$b) / 3) -lt $DarkThreshold) { $darkCount++ }
+        }
+        $rowDark[$y] = (($darkCount / [double]$w) -ge $DarkFraction)
+    }
+
+    $bestTop = -1; $bestBottom = -1; $bestLen = 0
+    $curStart = -1
+    for ($y = 0; $y -le $h; $y++) {
+        $isDark = ($y -lt $h) -and $rowDark[$y]
+        if ($isDark -and $curStart -lt 0) { $curStart = $y }
+        elseif (-not $isDark -and $curStart -ge 0) {
+            $len = $y - $curStart
+            if ($len -gt $bestLen) { $bestLen = $len; $bestTop = $curStart; $bestBottom = $y }
+            $curStart = -1
+        }
+    }
+    if ($bestTop -lt 0) { return $null }
+
+    # ---- Per-column dark fraction, restricted to those rows -> left/right ----
+    $bandHeight = $bestBottom - $bestTop
+    $colDark = New-Object bool[] $w
+    for ($x = 0; $x -lt $w; $x++) {
+        $darkCount = 0
+        for ($y = $bestTop; $y -lt $bestBottom; $y++) {
+            $px = ($y * $stride) + ($x * 4)
+            $b = $bytes[$px]; $gr = $bytes[$px + 1]; $r = $bytes[$px + 2]
+            if ((([int]$r + [int]$gr + [int]$b) / 3) -lt $DarkThreshold) { $darkCount++ }
+        }
+        $colDark[$x] = (($darkCount / [double]$bandHeight) -ge $DarkFraction)
+    }
+
+    $bestLeft = -1; $bestRight = -1; $bestColLen = 0
+    $curStart = -1
+    for ($x = 0; $x -le $w; $x++) {
+        $isDark = ($x -lt $w) -and $colDark[$x]
+        if ($isDark -and $curStart -lt 0) { $curStart = $x }
+        elseif (-not $isDark -and $curStart -ge 0) {
+            $len = $x - $curStart
+            if ($len -gt $bestColLen) { $bestColLen = $len; $bestLeft = $curStart; $bestRight = $x }
+            $curStart = -1
+        }
+    }
+    if ($bestLeft -lt 0) { return $null }
+
+    return @{ Left = $bestLeft; Top = $bestTop; Right = $bestRight; Bottom = $bestBottom }
+}
+
+# Mirrors AutoClipCaptureSqlPipelineScreen1.ps1's Get-Screen1DataRows:
+# finds the first line that actually has "COB" printed on it, and the
+# 0-based (line, column) it's at on THIS screen - never a hardcoded
+# row/column guess. This is what makes the preview below test the
+# exact same thing the real pipeline will click on, instead of a
+# fixed row/column number that may not match this screen's layout.
+function Get-FirstCobMatch {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $null }
+    $lines = $Text -split "`r`n|`n|`r"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $m = [regex]::Match($lines[$i], '\bCOB\b')
+        if ($m.Success) {
+            return [pscustomobject]@{ LineIndex = $i; ColIndex = $m.Index; LineText = $lines[$i] }
+        }
+    }
+    return $null
+}
+
+Write-Host "=====================================================" -ForegroundColor Yellow
+Write-Host " Screen1Select Automatic Calibration" -ForegroundColor Yellow
+Write-Host "=====================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "ASSUMPTIONS this calibration relies on:" -ForegroundColor Magenta
+Write-Host "  - Windows display scaling is set to 100% (Settings > System > Display)." -ForegroundColor Magenta
+Write-Host "  - The terminal's font size / window size won't change after this runs -" -ForegroundColor Magenta
+Write-Host "    if either does, the saved numbers go stale and you'll need to" -ForegroundColor Magenta
+Write-Host "    recalibrate (clicks will drift, worse further down the page)." -ForegroundColor Magenta
+Write-Host "  - The terminal window is fully visible on screen and not covered by" -ForegroundColor Magenta
+Write-Host "    another window right when the screenshot below is taken." -ForegroundColor Magenta
+Write-Host "  - The terminal renders on a solid dark/black background (this is what" -ForegroundColor Magenta
+Write-Host "    the detection below actually looks for)." -ForegroundColor Magenta
+Write-Host ""
+
+$configPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
+if (-not (Test-Path $configPath)) {
+    Write-Host "Could not find AutoClipCaptureConfig.json next to this script." -ForegroundColor Red
+    pause
+    exit 1
+}
+$config = Get-Content -Raw -Path $configPath | ConvertFrom-Json
+
+$targets = @()
+foreach ($pipeline in $config.Pipelines) {
+    if ($null -ne $pipeline.Screen1Select) { $targets += $pipeline }
+}
+if ($targets.Count -eq 0) {
+    Write-Host "No pipeline with a Screen1Select block was found in the config. Nothing to calibrate." -ForegroundColor Red
+    pause
+    exit 1
+}
+$chosenPipeline = $targets[0]
+if ($targets.Count -gt 1) {
+    Write-Host "`nMultiple pipelines need calibration. Which one?"
+    for ($i = 0; $i -lt $targets.Count; $i++) { Write-Host ("  [{0}] {1} ({2})" -f $i, $targets[$i].Name, $targets[$i].Id) }
+    $pIdx = Read-Host "Enter the number"
+    $chosenPipeline = $targets[[int]$pIdx]
+}
+
+# ClickColumnOffset: how many characters LEFT of "COB" the selection
+# field sits. This is the only fixed assumption left - unlike the old
+# cobColumn/firstDataRow guesses, AutoClipCaptureSqlPipelineScreen1.ps1
+# never assumes which column/row "COB" itself is on; it finds "COB" on
+# the real screen first and adds this offset to whatever column that
+# turned out to be. The preview below now does exactly the same thing,
+# so there's no separate row/column guess left to go stale.
+$clickColumnOffset = -2
+$cols = 80
+$rows = 32
+$chosenPipeline.Screen1Select.ClickColumnOffset = $clickColumnOffset
+
+Write-Host "`nMake sure your terminal window is open, fully visible, and NOT covered by another window." -ForegroundColor Cyan
+Write-Host "Open windows:"
+$windows = [CalibNative4]::GetVisibleWindows()
+for ($i = 0; $i -lt $windows.Count; $i++) {
+    Write-Host ("  [{0}] {1}" -f $i, $windows[$i].Value)
+}
+$winIdx = Read-Host "`nType the number next to your mainframe terminal window"
+if (-not ($winIdx -as [int]) -or [int]$winIdx -lt 0 -or [int]$winIdx -ge $windows.Count) {
+    Write-Host "Invalid choice. Nothing changed." -ForegroundColor Red
+    pause
+    exit 1
+}
+$targetHandle = $windows[[int]$winIdx].Key
+[void][CalibNative4]::SetForegroundWindow($targetHandle)
+Start-Sleep -Milliseconds 300   # give it a moment to actually come to the front before the screenshot
+
+Write-Host "`nTaking a screenshot and looking for the terminal grid..." -ForegroundColor Cyan
+$bmp = Get-WindowScreenshot -Handle $targetHandle
+if ($null -eq $bmp) {
+    Write-Host "Couldn't read that window's size/screenshot. Nothing changed." -ForegroundColor Red
+    pause
+    exit 1
+}
+
+$box = Find-DarkRectangle -Bmp $bmp
+$bmp.Dispose()
+
+if ($null -eq $box -or ($box.Right - $box.Left) -lt 100 -or ($box.Bottom - $box.Top) -lt 100) {
+    Write-Host "`nCouldn't confidently find a solid dark terminal rectangle in that window." -ForegroundColor Red
+    Write-Host "(Maybe the terminal uses a light color scheme, or another window was on top of it.)" -ForegroundColor Red
+    Write-Host "Use CalibrateScreen1AutoGuided.bat instead - it doesn't rely on detecting a dark background." -ForegroundColor Yellow
+    pause
+    exit 1
+}
+
+$boxWidth  = $box.Right - $box.Left
+$boxHeight = $box.Bottom - $box.Top
+$CharWidthPx  = [math]::Round(($boxWidth / $cols), 2)
+$CharHeightPx = [math]::Round(($boxHeight / $rows), 2)
+
+# Sanity-check the measured cell size against plausible terminal font
+# dimensions, so a bad detection (e.g. it found some other dark UI
+# panel instead of the actual terminal) gets caught here instead of
+# silently producing bad click coordinates later.
+if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $CharHeightPx -gt 50) {
+    Write-Host "`nDetected rectangle is $boxWidth x $boxHeight px, giving an implausible char size" -ForegroundColor Red
+    Write-Host "($CharWidthPx x $CharHeightPx px). That's probably not the terminal grid." -ForegroundColor Red
+    Write-Host "Use CalibrateScreen1AutoGuided.bat instead." -ForegroundColor Yellow
+    pause
+    exit 1
+}
+
+# Row-0/column-0 origin (cell CENTER), matching the exact convention
+# AutoClipCaptureSqlPipelineScreen1.ps1's click formula expects:
+#   ClientX = OriginX + Col * CharWidthPx
+#   ClientY = OriginY + Row * CharHeightPx
+$OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
+$OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
+
+Write-Host ""
+Write-Host "=====================================================" -ForegroundColor Yellow
+Write-Host " Detected" -ForegroundColor Yellow
+Write-Host "=====================================================" -ForegroundColor Yellow
+Write-Host ("  Terminal box   = {0}x{1} px (at client offset {2},{3})" -f $boxWidth, $boxHeight, $box.Left, $box.Top)
+Write-Host ("  OriginX        = {0}" -f $OriginX)
+Write-Host ("  OriginY        = {0}" -f $OriginY)
+Write-Host ("  CharWidthPx    = {0}" -f $CharWidthPx)
+Write-Host ("  CharHeightPx   = {0}" -f $CharHeightPx)
+
+# ---- Find the REAL first "COB" row on whatever screen is showing
+# right now, instead of assuming a fixed row/column - this is the part
+# that used to be hardcoded (cobColumn=5, firstDataRow=7) and could be
+# wrong for a given screen's actual layout. Make sure your terminal is
+# currently showing a REPOSITORY LIST page with at least one COB row
+# visible before continuing. ----
+Write-Host "`nCopying the current screen to find the real first 'COB' row..." -ForegroundColor Cyan
+[void][CalibNative4]::SetForegroundWindow($targetHandle)
+Start-Sleep -Milliseconds 300
+[System.Windows.Forms.SendKeys]::SendWait('^c')
+
+$copiedText = $null
+for ($try = 0; $try -lt 10; $try++) {
+    Start-Sleep -Milliseconds 150
+    try {
+        if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+            $candidate = [System.Windows.Forms.Clipboard]::GetText()
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) { $copiedText = $candidate; break }
+        }
+    } catch {}
+}
+
+$cobMatch = Get-FirstCobMatch -Text $copiedText
+if ($null -eq $cobMatch) {
+    Write-Host "`nCouldn't find any line with 'COB' on the current screen." -ForegroundColor Red
+    Write-Host "Navigate the terminal to a REPOSITORY LIST page that actually shows COB rows, then run this again." -ForegroundColor Red
+    pause
+    exit 1
+}
+Write-Host ("  First 'COB' found at line {0}, column {1}: `"{2}`"" -f $cobMatch.LineIndex, $cobMatch.ColIndex, $cobMatch.LineText.Trim()) -ForegroundColor Cyan
+
+# NOTE: previously corrected by +1 here on the assumption the raw
+# detected line sits one row ABOVE the true first data row. In
+# practice that made the real pipeline land one row BELOW the true
+# first data row (starting on the second COB row instead of the
+# first), so the raw detected line index is used as-is.
+$realLineIndex = $cobMatch.LineIndex
+
+$targetColIndex = $cobMatch.ColIndex + $clickColumnOffset
+$confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
+$confirmY = $OriginY + ($realLineIndex * $CharHeightPx)
+
+$pt = New-Object POINT2
+$pt.X = [int][math]::Round($confirmX)
+$pt.Y = [int][math]::Round($confirmY)
+[void][CalibNative4]::ClientToScreen($targetHandle, [ref]$pt)
+[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($pt.X, $pt.Y)
+
+Write-Host ""
+Write-Host "Pointer moved to the computed first-data-row selection field (next to 'COB')." -ForegroundColor Cyan
+Write-Host "Look at the terminal - does it land there? ENTER to save, Esc to cancel." -ForegroundColor Cyan
+Write-Host "(Reminder: this assumes 100% display scaling and today's font/window size." -ForegroundColor DarkGray
+Write-Host " Recalibrate if either changes later.)" -ForegroundColor DarkGray
+while ($true) {
+    $key = [Console]::ReadKey($true)
+    if ($key.Key -eq 'Enter') { break }
+    if ($key.Key -eq 'Escape') {
+        Write-Host "`nCancelled - nothing saved." -ForegroundColor Yellow
+        pause
+        exit 0
+    }
+}
+
+$chosenPipeline.Screen1Select.OriginX = $OriginX
+$chosenPipeline.Screen1Select.OriginY = $OriginY
+$chosenPipeline.Screen1Select.CharWidthPx = $CharWidthPx
+$chosenPipeline.Screen1Select.CharHeightPx = $CharHeightPx
+
+# These two are now the permanent, fixed row/column constants the real
+# pipeline uses for EVERY row on EVERY page (no more per-row text
+# scanning at runtime - see AutoClipCaptureSqlPipelineScreen1.ps1's
+# Get-Screen1FixedRows). They only need to be right once: LineIndex is
+# where row 1 of data sits (only valid because the header above the
+# list is always the same fixed size), ColIndex is where "Type" text
+# (COB/ASM) starts - the selection field itself is ColIndex + ClickColumnOffset.
+foreach ($prop in @(
+    @{ Name = 'FirstDataRowLineIndex'; Value = $realLineIndex },
+    @{ Name = 'SelectionColumnIndex';  Value = $cobMatch.ColIndex  }
+)) {
+    if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains $prop.Name)) {
+        $chosenPipeline.Screen1Select | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
+    } else {
+        $chosenPipeline.Screen1Select.($prop.Name) = $prop.Value
+    }
+}
+
+$calibNote = "Auto-calibrated {0} assuming 100% Windows display scaling AND that the header above the list is always exactly this many lines. Recalibrate if display scaling, the terminal's font size, the window size, or the header's line count changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote')) {
+    $chosenPipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $calibNote -Force
+} else {
+    $chosenPipeline.Screen1Select.CalibrationNote = $calibNote
+}
+
+$backupPath = Join-Path $PSScriptRoot ("AutoClipCaptureConfig.backup-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+Copy-Item -Path $configPath -Destination $backupPath -Force
+Write-Host ("`nBacked up old config to: {0}" -f (Split-Path $backupPath -Leaf))
+
+$config | ConvertTo-Json -Depth 20 | Set-Content -Path $configPath -Encoding UTF8
+
+Write-Host ""
+Write-Host "Done! AutoClipCaptureConfig.json has been updated." -ForegroundColor Green
+Write-Host "Close this window and try Ctrl+Shift+M again." -ForegroundColor Green
+Write-Host ""
+pause
+}
+# endregion: CalibrateScreen1Auto.ps1
+#=====================================================================
+
+# Both the main capture relay and the config-editor GUI need these,
+# regardless of which one ends up running.
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+if ($EditConfig) {
+    # -EditConfig was passed: open the settings GUI and stop - do not
+    # start the capture relay, do not touch DPI awareness or hotkeys.
+    Show-ConfigEditorGui
+    return
+}
+
+if ($Calibrate) {
+    # -Calibrate was passed: run the Screen1 auto-calibration tool and
+    # stop - do not start the capture relay. This branch runs the tool's
+    # own DPI-awareness setup itself (see Invoke-Screen1CalibrationTool
+    # below), so it deliberately does not fall through to the capture
+    # relay's DPI-awareness block right below.
+    Invoke-Screen1CalibrationTool
+    return
+}
 
 # ---- Make THIS PROCESS DPI-aware before anything below ever touches
 # a screen coordinate (ClientToScreen, SetCursorPos, GetWindowRect, or
@@ -236,10 +1680,685 @@ public static class CR_DpiAwareness {
 # a separate phase with its own state names. Dot-sourcing just defines
 # their functions into this script's scope - no side effects until the
 # pipeline tick handler below actually calls into them.
-. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen1.ps1")
-. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen2.ps1")
-. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineScreen3.ps1")
-. (Join-Path $PSScriptRoot "AutoClipCaptureSqlPipelineComponentList.ps1")
+# Pipeline screen logic used to live in its own file per screen (dot-sourced
+# at startup); they're now inlined directly below as clearly marked regions,
+# in the same order they used to be dot-sourced. Nothing about how they work
+# changed - Screen 1 = components, Screen 2 = environments, Screen 3 = the
+# COBOL/SQL search screen, and ComponentList = the optional Screen 1
+# paging pre-pass.
+
+#=====================================================================
+# region: AutoClipCaptureSqlPipelineScreen1.ps1 - formerly its own file, now inlined here
+#=====================================================================
+<#
+=====================================================================
+ AutoClipCaptureSqlPipelineScreen1.ps1
+
+ Screen 1 = the REPOSITORY LIST overview (Type/Name/Appl/Subappl/
+ Status columns, one row per component, "Row x of y ... More -->").
+
+ This file drives the Ctrl+Shift+M pipeline's main job: walk every row
+ slot of Screen 1, page by page, and for each one:
+   0. Row positions are FIXED, pure arithmetic - no page content is
+      read to find them. Screen1Select.FirstDataRowLineIndex and
+      Screen1Select.SelectionColumnIndex (set once by
+      CalibrateScreen1Auto.ps1, by actually finding the real first
+      "COB" row on a real screen) anchor row 0; every following row is
+      just + CharHeightPx per row, for exactly RowsPerPage rows. This
+      only works because the header above the list (title/"Show
+      Deleted: N"/column headers/filter line) is always exactly the
+      same size on every page - if that ever isn't true, row math
+      drifts and this whole approach stops being safe.
+   1. Every row slot is tried - there's no "is this actually a COB
+      row" check anymore. A slot with nothing real in it (past the end
+      of a partially-filled last page, or a non-COB row type) simply
+      doesn't navigate anywhere; step 4 below already treats that as
+      the normal "nothing happened, move on" case, so no separate
+      blank-detection step is needed.
+   1a. Click Screen1Select.ClickColumnOffset character columns to the
+      left of SelectionColumnIndex (default -2, lands on the "_"
+      selection field) using the pixel math calibrated by
+      CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 into
+      Pipelines[].Screen1Select (OriginX/OriginY/CharWidthPx/
+      CharHeightPx).
+   2. Type Screen1Select.SelectionText (default "B") and press Enter.
+   3. Confirm we landed on Screen 2 (COMPONENT VERSION - SELECT). If we
+      did, hand off to AutoClipCaptureSqlPipelineScreen2.ps1, which
+      logs it (if enabled) and queues a single F3 "back" to Screen 1
+      (that shared "go back" mechanic lives in AutoClipCapture.ps1
+      itself - see Back_Action/Back_Wait/Back_Copy).
+   4. If nothing happened (blank slot, non-COB row, or the item is
+      unavailable) - we're still on Screen 1 - just move on to the
+      next row slot without going back.
+   5. Once every row slot on the current page (RowsPerPage of them)
+      has been tried, press Screen1Select.PageNextToken (F8 by
+      default) to bring the next page into view, and keep going with
+      the SAME fixed row slots - until either
+      Screen1Select.EndOfListText shows up (explicit "end of list"
+      marker) or a freshly-paged screen comes back near-identical to
+      the one before it (Screen1Select.DupDetectThreshold - same
+      comparison the duplicate-capture protection elsewhere uses),
+      which means paging further isn't revealing anything new either.
+
+ States (all start with "Comp" so AutoClipCapture.ps1's tick switch
+ routes them here):
+   CompScan_Action  - build the fixed row-slot list (Get-Screen1FixedRows,
+                      pure arithmetic, no clipboard read needed). This
+                      exact name is also the pipeline's hard-coded
+                      starting state (see the Ctrl+Shift+M hotkey
+                      handler), so a pipeline with no ComponentList
+                      pre-pass lands here immediately.
+   CompZoom_Action  - click the row at
+                      $global:CR_PipelineScreen1Rows[$global:CR_PipelineComponentIdx],
+                      type the selection letter, press Enter.
+   CompZoom_Wait    - short delay before copying, so the new screen
+                      has time to render.
+   CompZoom_Copy    - Ctrl+C, read the clipboard, work out what
+                      happened, branch accordingly (see below).
+   CompNext_Action  - decide the next row (same page) or trigger a
+                      page turn. Reached either right after a
+                      non-navigating row (still on Screen 1) or once
+                      Screen 2 has been dealt with and Back_Copy has
+                      confirmed we're back on Screen 1. This exact
+                      name also doubles as the "AfterBack" marker the
+                      shared Back_Copy logic checks to know it should
+                      expect Screen 1 (not Screen 2) once the F3
+                      completes.
+   CompPage_Action  - send Screen1Select.PageNextToken (e.g. F8) to
+                      move to the next page.
+   CompPage_Wait    - short delay before copying the new page.
+   CompPage_Copy    - Ctrl+C, check EndOfListText / duplicate-page
+                      (still genuinely needs the page's text - that's
+                      the one place content is still read, purely to
+                      know when to STOP paging, never to find rows);
+                      either stop (pipeline complete) or rebuild the
+                      same fixed row-slot list and keep going from row
+                      0 of the new page.
+
+ $global:CR_PipelineComponentIdx is the 0-based index *into
+ $global:CR_PipelineScreen1Rows* (0..RowsPerPage-1, always the same
+ fixed slots). Both are reset by AutoClipCapture.ps1 whenever the
+ pipeline (re)starts, and reset again here every time a new page comes
+ in.
+=====================================================================
+#>
+
+# Builds the fixed set of row slots for one page - RowsPerPage of
+# them, starting at FirstDataRowLineIndex/SelectionColumnIndex (set
+# once, for real, by CalibrateScreen1Auto.ps1's Ctrl+C-based
+# detection) and stepping one line at a time. No page content is read
+# here at all: every page gets literally the same LineIndex/ColIndex
+# list, because the header above the list is always the same size.
+function Get-Screen1FixedRows {
+    param($Screen1Select)
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    $firstLine = [int]$Screen1Select.FirstDataRowLineIndex
+    $col       = [int]$Screen1Select.SelectionColumnIndex
+    $count     = [int]$Screen1Select.RowsPerPage
+
+    for ($i = 0; $i -lt $count; $i++) {
+        $rows.Add([pscustomobject]@{
+            LineIndex = $firstLine + $i
+            ColIndex  = $col
+        })
+    }
+
+    return $rows
+}
+
+# Works out the on-screen (screen-coordinate) point for one row slot,
+# using the OriginX/OriginY/CharWidthPx/CharHeightPx calibration
+# CalibrateScreen1Auto.ps1 produces, and the LineIndex/ColIndex that
+# Get-Screen1FixedRows generated for that slot (pure arithmetic off
+# FirstDataRowLineIndex/SelectionColumnIndex - not read from content).
+function Get-Screen1RowScreenPoint {
+    param(
+        [IntPtr]$Handle,
+        $Screen1Select,
+        [int]$LineIndex,
+        [int]$ColIndex
+    )
+
+    $targetColIndex = $ColIndex + [int]$Screen1Select.ClickColumnOffset
+
+    # No manual scaling correction here anymore - this used to multiply
+    # by a percentage typed into a popup at Ctrl+Shift+M start
+    # (Show-ScalingPrompt), completely independent of what
+    # CalibrateScreen1Auto.ps1 measured. That meant a mistyped or
+    # left-over non-100 value here would make every click disagree with
+    # the calibration preview, with nothing to indicate why. Confirmed
+    # DPI-awareness already produces correct real-pixel coordinates
+    # (single monitor, 100% Windows scaling), so this math is now
+    # IDENTICAL to what CalibrateScreen1Auto.ps1's own preview computes.
+    $clientX = [double]$Screen1Select.OriginX + ($targetColIndex * [double]$Screen1Select.CharWidthPx)
+    $clientY = [double]$Screen1Select.OriginY + ($LineIndex * [double]$Screen1Select.CharHeightPx)
+
+    $pt = New-Object POINT
+    $pt.X = [int][math]::Round($clientX)
+    $pt.Y = [int][math]::Round($clientY)
+    [void][Win32]::ClientToScreen($Handle, [ref]$pt)
+    return $pt
+}
+
+# Moves the real mouse cursor to a screen-coordinate point and performs
+# a single left click there. Used instead of keyboard navigation because
+# the REPOSITORY LIST screen expects a line-command letter typed
+# directly into each row's own selection field, not a highlighted-item
+# Enter/Down style list.
+function Invoke-Screen1RowClick {
+    param([System.Drawing.Point]$ScreenPoint)
+
+    [void][Win32]::SetCursorPos($ScreenPoint.X, $ScreenPoint.Y)
+    Start-Sleep -Milliseconds 20
+    [Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)  # MOUSEEVENTF_LEFTDOWN
+    Start-Sleep -Milliseconds 20
+    [Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)  # MOUSEEVENTF_LEFTUP
+}
+
+function Invoke-PipelineScreen1Tick {
+    $pipeline = $global:CR_ActivePipelineConfig
+    $s1       = $pipeline.Screen1Select
+
+    switch ($global:CR_PipelineState) {
+
+        'CompScan_Action' {
+            if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0 -or $null -eq $s1.FirstDataRowLineIndex -or $null -eq $s1.SelectionColumnIndex) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select isn't calibrated yet - run StartAutoClipCapture.bat Calibrate first. Stopping." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "NOT CALIBRATED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            # Fixed row slots - pure arithmetic, no Ctrl+C/clipboard
+            # read needed at all to find them.
+            $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1
+            $global:CR_PipelineComponentIdx  = 0
+            $global:CR_PipelineState = 'CompZoom_Action'
+            $global:CR_ElapsedMs     = 0
+        }
+
+        'CompZoom_Action' {
+            if ($null -eq $s1 -or [double]$s1.CharWidthPx -le 0 -or [double]$s1.CharHeightPx -le 0 -or $null -eq $s1.FirstDataRowLineIndex -or $null -eq $s1.SelectionColumnIndex) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen1Select isn't calibrated yet - run StartAutoClipCapture.bat Calibrate first. Stopping." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "NOT CALIBRATED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $rowIdx = [int]$global:CR_PipelineComponentIdx
+            $row = $global:CR_PipelineScreen1Rows[$rowIdx]
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+
+            if (-not $global:CR_PipelineStepPending) {
+                $wr = New-Object RECT
+                [void][Win32]::GetWindowRect($global:CR_TargetHandle, [ref]$wr)
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1): LineIndex=$($row.LineIndex) ColIndex=$($row.ColIndex) -> click ($($screenPt.X),$($screenPt.Y))  |  Screen1Select Origin=($($s1.OriginX),$($s1.OriginY)) CharSize=$($s1.CharWidthPx)x$($s1.CharHeightPx)  |  Target window bounds ($($wr.Left),$($wr.Top))-($($wr.Right),$($wr.Bottom))" -ForegroundColor DarkGray
+                if ($screenPt.X -lt $wr.Left -or $screenPt.X -gt $wr.Right -or $screenPt.Y -lt $wr.Top -or $screenPt.Y -gt $wr.Bottom) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] WARNING: that click point is OUTSIDE the target window's bounds - Screen1Select needs recalibrating (StartAutoClipCapture.bat Calibrate)." -ForegroundColor Red
+                }
+            }
+
+            # Shown BEFORE anything is clicked - the red circle marker
+            # lands on $screenPt so a wrong target is obvious right
+            # away, without a single click having happened yet.
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to click here, type '$($s1.SelectionText)' + Enter"
+            if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
+
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - selecting" ([System.Drawing.Color]::Lime)
+            Invoke-Screen1RowClick -ScreenPoint $screenPt
+            Start-Sleep -Milliseconds 20
+            [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText + '{ENTER}')
+
+            $global:CR_PipelineState = 'CompZoom_Wait'
+            $global:CR_ElapsedMs     = 0
+        }
+
+        'CompZoom_Wait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'CompZoom_Copy'
+                $global:CR_ElapsedMs     = 0
+            }
+        }
+
+        'CompZoom_Copy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                        $text = [System.Windows.Forms.Clipboard]::GetText()
+                    }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                }
+
+                $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+
+                if ($detected -eq 2) {
+                    # Landed on Screen 2 (COMPONENT VERSION - SELECT).
+                    # Hand off to Screen2.ps1 to log it and queue the
+                    # single F3 back to Screen 1.
+                    $global:CR_PipelineScreen1RetryCount   = 0
+                    $global:CR_PipelineScreen2CapturedText = $text
+                    $global:CR_PipelineState = 'EnvLog_Action'
+                    $global:CR_ElapsedMs     = 0
+                }
+                elseif ($detected -eq 1) {
+                    # Still on Screen 1 - this row's selection field
+                    # didn't lead anywhere (blank row, or the item is
+                    # unavailable). Nothing to go "back" from - just
+                    # move on to the next row.
+                    $global:CR_PipelineScreen1RetryCount = 0
+                    $global:CR_PipelineState = 'CompNext_Action'
+                    $global:CR_ElapsedMs     = 0
+                }
+                else {
+                    # Unrecognized screen (e.g. the terminal hadn't
+                    # finished redrawing yet). Retry the same row a few
+                    # times before giving up on it, rather than either
+                    # spinning forever or aborting the whole pipeline
+                    # over one slow screen.
+                    $global:CR_PipelineScreen1RetryCount++
+                    $maxRetries = [int]$s1.MaxRowRetries
+                    if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) on page $($global:CR_PipelineScreen1PageIdx + 1) gave an unrecognized screen $maxRetries time(s) in a row - skipping it." -ForegroundColor Yellow
+                        $global:CR_PipelineScreen1RetryCount = 0
+                        $global:CR_PipelineState = 'CompNext_Action'
+                    } else {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unrecognized screen after selecting row $($global:CR_PipelineComponentIdx + 1) - retrying ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
+                        $global:CR_PipelineState = 'CompZoom_Action'
+                    }
+                    $global:CR_ElapsedMs = 0
+                }
+            }
+        }
+
+        'CompNext_Action' {
+            $nextRow = [int]$global:CR_PipelineComponentIdx + 1
+            if ($nextRow -lt $global:CR_PipelineScreen1Rows.Count) {
+                $global:CR_PipelineComponentIdx = $nextRow
+                $global:CR_PipelineState = 'CompZoom_Action'
+                $global:CR_ElapsedMs     = 0
+            } else {
+                # Every detected row on this page has been tried - page forward.
+                $global:CR_PipelineState = 'CompPage_Action'
+                $global:CR_ElapsedMs     = 0
+            }
+        }
+
+        'CompPage_Action' {
+            if ([int]$global:CR_PipelineScreen1PageIdx + 1 -ge [int]$s1.MaxPages) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Reached the MaxPages safety limit ($($s1.MaxPages)) - stopping." -ForegroundColor Yellow
+                Show-RelayResultOverlay -Text "STOPPED (page limit reached)" -Color ([System.Drawing.Color]::Gray)
+                Stop-PipelineCapture
+                return
+            }
+
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press $($s1.PageNextDisplay) to page forward"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
+
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Paging to next screen ($($s1.PageNextDisplay))" ([System.Drawing.Color]::Orange)
+            [System.Windows.Forms.SendKeys]::SendWait([string]$s1.PageNextToken)
+            $global:CR_PipelineState = 'CompPage_Wait'
+            $global:CR_ElapsedMs     = 0
+        }
+
+        'CompPage_Wait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'CompPage_Copy'
+                $global:CR_ElapsedMs     = 0
+            }
+        }
+
+        'CompPage_Copy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                        $text = [System.Windows.Forms.Clipboard]::GetText()
+                    }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                }
+
+                [void](Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name)
+
+                $isEndOfList = Test-RelayTextContains -Text $text -Needle ([string]$s1.EndOfListText)
+                $isDuplicate = $false
+                if (-not $isEndOfList -and $null -ne $global:CR_PipelineScreen1PrevPageText) {
+                    $similarity = Get-TextSimilarity -A $global:CR_PipelineScreen1PrevPageText -B $text
+                    $isDuplicate = ($similarity -ge [double]$s1.DupDetectThreshold)
+                }
+
+                if ($isEndOfList -or $isDuplicate) {
+                    $reason = if ($isEndOfList) { "'$($s1.EndOfListText)' marker seen" } else { "next page matched the previous one - no new data" }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Done - $reason. Processed $($global:CR_PipelineScreen1PageIdx + 1) page(s)." -ForegroundColor Green
+                    Show-RelayResultOverlay -Text "PIPELINE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                # Text was only needed for the end-of-list/duplicate
+                # check just above - row positions are the same fixed
+                # slots on every page, so just rebuild them directly.
+                $global:CR_PipelineScreen1PrevPageText = $text
+                $global:CR_PipelineScreen1PageIdx++
+                $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1
+                $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineState = 'CompZoom_Action'
+                $global:CR_ElapsedMs     = 0
+            }
+        }
+
+        default {
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unknown Screen1 state '$($global:CR_PipelineState)' - resetting." -ForegroundColor Yellow
+            $global:CR_PipelineComponentIdx = 0
+            $global:CR_PipelineState = 'CompScan_Action'
+            $global:CR_ElapsedMs     = 0
+        }
+    }
+}
+#=====================================================================
+# endregion: AutoClipCaptureSqlPipelineScreen1.ps1
+#=====================================================================
+
+#=====================================================================
+# region: AutoClipCaptureSqlPipelineScreen2.ps1 - formerly its own file, now inlined here
+#=====================================================================
+<#
+=====================================================================
+ AutoClipCaptureSqlPipelineScreen2.ps1
+
+ Screen 2 = COMPONENT VERSION - SELECT, the screen that appears after
+ typing a selection letter (e.g. "B") into a Screen 1 row and pressing
+ Enter. For the current, simplified cobol-pipeline flow this screen is
+ only ever looked at, not drilled into any further (no environment
+ zoom, no SQL search) - Screen1.ps1 already captured its text via
+ Ctrl+C right before handing off here (see CompZoom_Copy), so this
+ file's only job is:
+   1. Optionally append that captured text to
+      Screen1Select.OutputFileName (pipeline_component_versions.txt by
+      default), if Screen1Select.LogScreen2Text is true.
+   2. Queue a single F3 back to Screen 1 via the shared
+      Back_Action/Back_Wait/Back_Copy state chain in
+      AutoClipCapture.ps1, by setting $global:CR_PipelineAfterBack to
+      'CompNext_Action' (the exact state name AutoClipCapture.ps1's
+      Back_Copy checks for to know it should expect to land back on
+      Screen 1).
+
+ State (starts with "Env" so AutoClipCapture.ps1's tick switch routes
+ it here):
+   EnvLog_Action - do the steps above, in a single tick (no waiting
+                   needed - the text was already captured on Screen 1).
+=====================================================================
+#>
+
+function Invoke-PipelineScreen2Tick {
+    $pipeline = $global:CR_ActivePipelineConfig
+    $s1       = $pipeline.Screen1Select
+
+    switch ($global:CR_PipelineState) {
+
+        'EnvLog_Action' {
+            if ([bool]$s1.LogScreen2Text -and -not [string]::IsNullOrEmpty($global:CR_PipelineScreen2CapturedText)) {
+                try {
+                    $outPath = Join-Path $LogDir ([string]$s1.OutputFileName)
+                    $rowLabel = "Page $($global:CR_PipelineScreen1PageIdx + 1), row $($global:CR_PipelineComponentIdx + 1)"
+                    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                    $header = "===== $rowLabel - $stamp ====="
+                    Add-Content -Path $outPath -Value $header
+                    Add-Content -Path $outPath -Value $global:CR_PipelineScreen2CapturedText
+                    Add-Content -Path $outPath -Value ''
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Failed to log Screen 2 text: $_" -ForegroundColor Yellow
+                }
+            }
+
+            $global:CR_PipelineScreen2CapturedText = $null
+
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Viewed, returning" ([System.Drawing.Color]::Orange)
+            $global:CR_PipelineAfterBack = 'CompNext_Action'
+            $global:CR_PipelineState     = 'Back_Action'
+            $global:CR_ElapsedMs         = 0
+        }
+
+        default {
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unknown Screen2 state '$($global:CR_PipelineState)' - going back to be safe." -ForegroundColor Yellow
+            $global:CR_PipelineAfterBack = 'CompNext_Action'
+            $global:CR_PipelineState     = 'Back_Action'
+            $global:CR_ElapsedMs         = 0
+        }
+    }
+}
+#=====================================================================
+# endregion: AutoClipCaptureSqlPipelineScreen2.ps1
+#=====================================================================
+
+#=====================================================================
+# region: AutoClipCaptureSqlPipelineScreen3.ps1 - formerly its own file, now inlined here
+#=====================================================================
+<#
+=====================================================================
+ AutoClipCaptureSqlPipelineScreen3.ps1
+
+ Screen 3 = the COBOL/SQL search screen a full component -> environment
+ -> SQL-search pipeline would eventually drill into. NOT IMPLEMENTED
+ YET - the current cobol-pipeline flow only ever goes Screen 1 -> click
+ a row -> Screen 2 -> F3 back -> next row (see
+ AutoClipCaptureSqlPipelineScreen1.ps1 and ...Screen2.ps1), so no
+ 'Sql_*' state should ever actually be set.
+
+ This file exists only so AutoClipCapture.ps1's dot-source of it at
+ startup succeeds, and so that IF some future state machine change
+ ever does set a 'Sql_*' state by mistake (or on purpose, once this is
+ built out), the pipeline fails safely - stopping with a clear message
+ - instead of the tick switch silently matching nothing and the
+ automation hanging forever in an unhandled state.
+
+ When this actually gets built out, it should follow the same shape as
+ the other two files: a few small states (Action -> Wait -> Copy),
+ using $pipeline.Sql (already present in AutoClipCaptureConfig.json
+ and already defaulted by AutoClipCapture.ps1's
+ Add-PipelineLevelDefaults/MaxIterations backfill) for the actual
+ found/not-found search logic - mirroring the built-in "SQL Search"
+ scan Mode's Action/PostAction/PostCopy loop.
+=====================================================================
+#>
+
+function Invoke-PipelineScreen3Tick {
+    $pipeline = $global:CR_ActivePipelineConfig
+    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen 3 (SQL search) isn't implemented yet - stopping to be safe." -ForegroundColor Red
+    Show-RelayResultOverlay -Text "SCREEN 3 NOT IMPLEMENTED - STOPPED" -Color ([System.Drawing.Color]::Red)
+    Stop-PipelineCapture
+}
+#=====================================================================
+# endregion: AutoClipCaptureSqlPipelineScreen3.ps1
+#=====================================================================
+
+#=====================================================================
+# region: AutoClipCaptureSqlPipelineComponentList.ps1 - formerly its own file, now inlined here
+#=====================================================================
+<#
+=====================================================================
+ AutoClipCaptureSqlPipelineComponentList.ps1
+
+ Optional pre-pass (Pipelines[].ComponentList.Enabled) that just pages
+ through Screen 1 (REPOSITORY LIST) front to back, capturing everything
+ into a plain text file (ComponentList.OutputFileName) - no clicking,
+ no selecting, nothing opened. Off by default (see
+ AutoClipCaptureConfig.json - ComponentList.Enabled is false) so
+ pressing the pipeline hotkey goes straight into the row-selection walk
+ in AutoClipCaptureSqlPipelineScreen1.ps1 instead. Turn it on if you
+ also want a plain-text copy of the whole repository list saved
+ somewhere before/instead of the click-through pass.
+
+ States (all start with "List" so AutoClipCapture.ps1's tick switch
+ routes them here):
+   ListCapture_Start - one-time setup (resets the output file for this
+                        run), then falls straight into a copy.
+   ListCapture_Wait  - short delay before copying (only used between
+                        pages, after ListCapture_Next).
+   ListCapture_Copy  - Ctrl+C, trim ComponentList.SkipRowsStart/
+                        SkipRowsEnd rows off, append what's left to the
+                        output file, then either stop (EndOfListText
+                        seen, or this page duplicates the last one) or
+                        move to ListCapture_Next.
+   ListCapture_Next  - send ComponentList.NextActionToken (F8 by
+                        default) to bring the next page into view.
+=====================================================================
+#>
+
+function Invoke-PipelineListTick {
+    $pipeline = $global:CR_ActivePipelineConfig
+    $cl       = $pipeline.ComponentList
+
+    switch ($global:CR_PipelineState) {
+
+        'ListCapture_Start' {
+            try {
+                if (Test-Path $global:CR_PipelineListOutputPath) {
+                    Remove-Item -Path $global:CR_PipelineListOutputPath -Force
+                }
+            } catch {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not reset $($global:CR_PipelineListOutputPath): $_" -ForegroundColor Yellow
+            }
+            $global:CR_PipelineListPageIdx      = 0
+            $global:CR_PipelineListPrevFiltered = $null
+
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press Ctrl+C to capture page 1"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
+
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Capturing component list (page 1)" ([System.Drawing.Color]::Lime)
+            [System.Windows.Forms.SendKeys]::SendWait('^c')
+            $global:CR_PipelineState = 'ListCapture_Copy'
+            $global:CR_ElapsedMs     = 0
+        }
+
+        'ListCapture_Wait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'ListCapture_Copy'
+                $global:CR_ElapsedMs     = 0
+            }
+        }
+
+        'ListCapture_Copy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                        $text = [System.Windows.Forms.Clipboard]::GetText()
+                    }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                }
+
+                [void](Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name)
+
+                $isEndOfList = Test-RelayTextContains -Text $text -Needle ([string]$cl.EndOfListText)
+
+                $filtered = Get-FilteredCaptureText -Text $text -SkipStart ([int]$cl.SkipRowsStart) -SkipEnd ([int]$cl.SkipRowsEnd)
+                $isDuplicate = $false
+                if (-not $isEndOfList -and $null -ne $global:CR_PipelineListPrevFiltered) {
+                    $similarity = Get-TextSimilarity -A $global:CR_PipelineListPrevFiltered -B $filtered
+                    $isDuplicate = ($similarity -ge [double]$cl.DupDetectThreshold)
+                }
+
+                if (-not $isDuplicate -and -not [string]::IsNullOrEmpty($filtered)) {
+                    try {
+                        Add-Content -Path $global:CR_PipelineListOutputPath -Value $filtered
+                    } catch {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Failed to write $($global:CR_PipelineListOutputPath): $_" -ForegroundColor Red
+                    }
+                }
+
+                if ($isEndOfList -or $isDuplicate) {
+                    $reason = if ($isEndOfList) { "'$($cl.EndOfListText)' marker seen" } else { "next page matched the previous one - no new data" }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Component list capture done - $reason. $($global:CR_PipelineListPageIdx + 1) page(s) saved to $($global:CR_PipelineListOutputPath)." -ForegroundColor Green
+                    Show-RelayResultOverlay -Text "COMPONENT LIST SAVED" -Color ([System.Drawing.Color]::LimeGreen)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                if ([int]$global:CR_PipelineListPageIdx + 1 -ge [int]$cl.MaxPages) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Reached the MaxPages safety limit ($($cl.MaxPages)) - stopping." -ForegroundColor Yellow
+                    Show-RelayResultOverlay -Text "STOPPED (page limit reached)" -Color ([System.Drawing.Color]::Gray)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                $global:CR_PipelineListPrevFiltered = $filtered
+                $global:CR_PipelineListPageIdx++
+                $global:CR_PipelineState = 'ListCapture_Next'
+                $global:CR_ElapsedMs     = 0
+            }
+        }
+
+        'ListCapture_Next' {
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press the next-page key to capture page $($global:CR_PipelineListPageIdx + 1)"
+            if (Request-PipelineStepConfirm -Description $desc) { return }
+
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Capturing component list (page $($global:CR_PipelineListPageIdx + 1))" ([System.Drawing.Color]::Lime)
+            [System.Windows.Forms.SendKeys]::SendWait([string]$cl.NextActionToken)
+            $global:CR_PipelineState = 'ListCapture_Wait'
+            $global:CR_ElapsedMs     = 0
+        }
+
+        default {
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unknown List state '$($global:CR_PipelineState)' - resetting." -ForegroundColor Yellow
+            $global:CR_PipelineState = 'ListCapture_Start'
+            $global:CR_ElapsedMs     = 0
+        }
+    }
+}
+#=====================================================================
+# endregion: AutoClipCaptureSqlPipelineComponentList.ps1
+#=====================================================================
 
 function Get-DefaultConfig {
     [pscustomobject]@{
@@ -511,7 +2630,7 @@ function Add-PipelineScreen1SelectDefaults {
         MaxRowRetries      = 3
         LogScreen2Text     = $true
         OutputFileName     = 'pipeline_component_versions.txt'
-        CalibrationNote    = 'Not calibrated yet - run CalibrateScreen1Auto.bat (or CalibrateScreen1AutoGuided.bat).'
+        CalibrationNote    = 'Not calibrated yet - run StartAutoClipCapture.bat Calibrate (or CalibrateScreen1AutoGuided.bat, if you still use that one).'
     }
 
     if (-not ($Pipeline.PSObject.Properties.Name -contains 'Screen1Select') -or $null -eq $Pipeline.Screen1Select) {
@@ -1443,7 +3562,7 @@ function Confirm-TargetWindow {
 # WinForms window to make foreground/topmost on its own.
 function Show-Screen1CalibrationPrompt {
     param([string]$PipelineName)
-    $msg = "'$PipelineName' isn't calibrated yet (Screen1Select has no pixel geometry).`n`nRun calibration now?`n`nYes = launch CalibrateScreen1Auto.ps1 now.`nNo  = skip and try to start anyway (it will stop immediately if it's really not calibrated)."
+    $msg = "'$PipelineName' isn't calibrated yet (Screen1Select has no pixel geometry).`n`nRun calibration now?`n`nYes = launch the calibration tool now.`nNo  = skip and try to start anyway (it will stop immediately if it's really not calibrated)."
 
     $MB_YESNO         = 0x00000004
     $MB_ICONQUESTION  = 0x00000020
@@ -1469,14 +3588,14 @@ function Show-Screen1CalibrationPrompt {
 function Invoke-Screen1CalibrationNow {
     param($Pipeline)
 
-    $calibScript = Join-Path $PSScriptRoot "CalibrateScreen1Auto.ps1"
-    if (-not (Test-Path $calibScript)) {
-        Write-Host "[AutoClipCapture] Can't find CalibrateScreen1Auto.ps1 next to this script." -ForegroundColor Red
+    $selfScript = $PSCommandPath
+    if ([string]::IsNullOrEmpty($selfScript) -or -not (Test-Path $selfScript)) {
+        Write-Host "[AutoClipCapture] Can't determine this script's own file path to relaunch for calibration." -ForegroundColor Red
         return
     }
 
     Start-Process -FilePath "powershell.exe" `
-        -ArgumentList @('-STA','-NoProfile','-NoLogo','-ExecutionPolicy','Bypass','-File', "`"$calibScript`"") `
+        -ArgumentList @('-STA','-NoProfile','-NoLogo','-ExecutionPolicy','Bypass','-File', "`"$selfScript`"", '-Calibrate') `
         -Wait
 
     if (-not (Test-Path $ConfigPath)) { return }
@@ -1705,7 +3824,7 @@ if ($DupDetectEnabled) {
 }
 $anyScreen1Pipeline = ($PipelineHotkeyMap.Values | Where-Object { $null -ne $_.Screen1Select }) | Select-Object -First 1
 if ($null -ne $anyScreen1Pipeline) {
-    Write-Host "This build now forces per-monitor DPI awareness before touching any screen coordinate - if Screen1Select was calibrated with an OLDER build and clicks look off (or the red circle when stepping through Ctrl+Shift+M lands outside the terminal), run CalibrateScreen1Auto.bat again to recalibrate under the new, consistent coordinates. This only matters if Windows display scaling isn't 100%." -ForegroundColor Cyan
+    Write-Host "This build now forces per-monitor DPI awareness before touching any screen coordinate - if Screen1Select was calibrated with an OLDER build and clicks look off (or the red circle when stepping through Ctrl+Shift+M lands outside the terminal), run StartAutoClipCapture.bat Calibrate again to recalibrate under the new, consistent coordinates. This only matters if Windows display scaling isn't 100%." -ForegroundColor Cyan
 }
 Write-Host ""
 

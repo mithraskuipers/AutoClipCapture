@@ -1,3 +1,0 @@
-The fix at that point is either to set both monitors to the same scaling %, 
-or to make the click math look up the terminal window's actual monitor DPI at 
-click-time instead of trusting the assumed 100%.
