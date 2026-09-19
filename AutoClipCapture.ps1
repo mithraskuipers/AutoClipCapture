@@ -130,6 +130,14 @@
                        array) - like Modes, they aren't edited from the
                        config GUI.
 
+                       Each pipeline has TWO hotkeys: Hotkey (Ctrl+Shift+M)
+                       runs it fully automatically, and StepHotkey
+                       (Ctrl+Shift+N) runs the exact same thing step by
+                       step, waiting for the step-confirm key (Right
+                       Arrow) before each input. Screen1Select.StartRowOffset
+                       (default 1) starts the row clicking that many rows
+                       below the calibrated first data row.
+
                        A Pipeline can also turn on an optional
                        "ComponentList" pre-pass (Pipelines[].ComponentList.Enabled).
                        When on, pressing the pipeline's hotkey (assumed
@@ -1798,6 +1806,13 @@ function Get-Screen1FixedRows {
     $firstLine = [int]$Screen1Select.FirstDataRowLineIndex
     $col       = [int]$Screen1Select.SelectionColumnIndex
     $count     = [int]$Screen1Select.RowsPerPage
+    # Shift the whole grid down by StartRowOffset lines (default 1) so the
+    # first click lands one row lower than FirstDataRowLineIndex itself.
+    $startOffset = 1
+    if ($Screen1Select.PSObject.Properties.Name -contains 'StartRowOffset' -and $null -ne $Screen1Select.StartRowOffset) {
+        $startOffset = [int]$Screen1Select.StartRowOffset
+    }
+    $firstLine += $startOffset
 
     for ($i = 0; $i -lt $count; $i++) {
         $rows.Add([pscustomobject]@{
@@ -2507,10 +2522,15 @@ if ($Config.PSObject.Properties.Name -contains 'ResultOverlayDurationMs') {
 # be pressed before actually doing it. Set PipelineStepConfirmEnabled
 # to false in the config to go back to fully automatic. ----
 if ($Config.PSObject.Properties.Name -contains 'PipelineStepConfirmEnabled') {
-    $global:CR_StepConfirmEnabled = [bool]$Config.PipelineStepConfirmEnabled
+    $global:CR_StepConfirmAllowed = [bool]$Config.PipelineStepConfirmEnabled
 } else {
-    $global:CR_StepConfirmEnabled = $true
+    $global:CR_StepConfirmAllowed = $true
 }
+# Per-run flag: $true only for a pipeline started with its StepHotkey
+# (Ctrl+Shift+N). A pipeline started with its normal Hotkey
+# (Ctrl+Shift+M) runs fully automatically. Set for real in the
+# pipeline hotkey handler each time a pipeline starts.
+$global:CR_StepConfirmEnabled = $false
 
 if ($Config.PSObject.Properties.Name -contains 'StepConfirmHotkey' -and $null -ne $Config.StepConfirmHotkey) {
     $StepConfirmModifiers = [int]$Config.StepConfirmHotkey.Modifiers
@@ -2628,6 +2648,7 @@ function Add-PipelineScreen1SelectDefaults {
         ClickColumnOffset  = -2
         SelectionText      = 'B'
         RowsPerPage        = 25
+        StartRowOffset     = 1
         PageNextToken      = '{F8}'
         PageNextDisplay    = 'F8'
         EndOfListText      = 'Bottom of List'
@@ -2659,6 +2680,12 @@ foreach ($p in $PipelineConfigs) {
     }
     if ($null -ne $p.Hotkey -and -not ($p.Hotkey.PSObject.Properties.Name -contains 'RequireRightModifier')) {
         $p.Hotkey | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
+    }
+    # Step-by-step twin of the pipeline hotkey: Ctrl+Shift+N by default.
+    if (-not ($p.PSObject.Properties.Name -contains 'StepHotkey') -or $null -eq $p.StepHotkey) {
+        $p | Add-Member -NotePropertyName StepHotkey -NotePropertyValue ([pscustomobject]@{ Modifiers = 6; Key = 78; Display = 'Ctrl+Shift+N'; RequireRightModifier = $false }) -Force
+    } elseif (-not ($p.StepHotkey.PSObject.Properties.Name -contains 'RequireRightModifier')) {
+        $p.StepHotkey | Add-Member -NotePropertyName RequireRightModifier -NotePropertyValue $false -Force
     }
     [void](Add-PipelineLevelDefaults -Level $p.Component -DefaultMaxItems 100)
     [void](Add-PipelineLevelDefaults -Level $p.Environment -DefaultMaxItems 20)
@@ -3067,6 +3094,24 @@ foreach ($p in $PipelineConfigs) {
         continue
     }
     $PipelineHotkeyMap[$hkId] = $p
+}
+
+# ---- Step-by-step twin hotkeys (Ctrl+Shift+N by default): same pipeline,
+# but each input waits for the step-confirm key. IDs live in their own
+# range so they never collide with the automatic pipeline hotkeys. ----
+$PipelineStepHotkeyMap  = @{}
+$PipelineStepHotkeyBase = 6000
+$pipelineIndex = 0
+foreach ($p in $PipelineConfigs) {
+    $pipelineIndex++
+    if (-not $p.Enabled) { continue }
+    if ($null -eq $p.StepHotkey -or $null -eq $p.StepHotkey.Key -or [int]$p.StepHotkey.Key -eq 0) { continue }
+    $hkId  = $PipelineStepHotkeyBase + $pipelineIndex
+    if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $hkId, [int]$p.StepHotkey.Modifiers, [int]$p.StepHotkey.Key)) {
+        Write-Host "Failed to register the step-by-step hotkey for pipeline '$($p.Name)' ($($p.StepHotkey.Display)). It may already be in use." -ForegroundColor Red
+        continue
+    }
+    $PipelineStepHotkeyMap[$hkId] = $p
 }
 
 # True only when Screen1Select has real (non-zero) pixel geometry -
@@ -3817,6 +3862,10 @@ foreach ($hkId in $PipelineHotkeyMap.Keys) {
         Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
     }
 }
+foreach ($hkId in $PipelineStepHotkeyMap.Keys) {
+    $p = $PipelineStepHotkeyMap[$hkId]
+    Write-Host "  $($p.StepHotkey.Display)  -> pipeline: $($p.Name)  (same as $($p.Hotkey.Display), but STEP BY STEP - press $StepConfirmDisplay to confirm each input)" -ForegroundColor White
+}
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
 Write-Host "TXT folder: $TxtDir"
@@ -3832,7 +3881,7 @@ if ($DupDetectEnabled) {
 }
 $anyScreen1Pipeline = ($PipelineHotkeyMap.Values | Where-Object { $null -ne $_.Screen1Select }) | Select-Object -First 1
 if ($null -ne $anyScreen1Pipeline) {
-    Write-Host "This build now forces per-monitor DPI awareness before touching any screen coordinate - if Screen1Select was calibrated with an OLDER build and clicks look off (or the red circle when stepping through Ctrl+Shift+M lands outside the terminal), run StartAutoClipCapture.bat Calibrate again to recalibrate under the new, consistent coordinates. This only matters if Windows display scaling isn't 100%." -ForegroundColor Cyan
+    Write-Host "This build now forces per-monitor DPI awareness before touching any screen coordinate - if Screen1Select was calibrated with an OLDER build and clicks look off (or the red circle when stepping through Ctrl+Shift+N lands outside the terminal), run StartAutoClipCapture.bat Calibrate again to recalibrate under the new, consistent coordinates. This only matters if Windows display scaling isn't 100%." -ForegroundColor Cyan
 }
 Write-Host ""
 
@@ -4373,9 +4422,12 @@ $hotkeyAction = {
             $global:CR_Selecting = $false
         }
     }
-    elseif ($PipelineHotkeyMap.ContainsKey($id)) {
-        $pipeline = $PipelineHotkeyMap[$id]
-        if (-not (Test-RightModifierSatisfied -Modifiers ([int]$pipeline.Hotkey.Modifiers) -RequireRight ([bool]$pipeline.Hotkey.RequireRightModifier))) { return }
+    elseif ($PipelineHotkeyMap.ContainsKey($id) -or $PipelineStepHotkeyMap.ContainsKey($id)) {
+        # Ctrl+Shift+M (Hotkey) = fully automatic; Ctrl+Shift+N (StepHotkey) = step by step.
+        $isStepRun = $PipelineStepHotkeyMap.ContainsKey($id)
+        $pipeline  = if ($isStepRun) { $PipelineStepHotkeyMap[$id] } else { $PipelineHotkeyMap[$id] }
+        $pressedHotkey = if ($isStepRun) { $pipeline.StepHotkey } else { $pipeline.Hotkey }
+        if (-not (Test-RightModifierSatisfied -Modifiers ([int]$pressedHotkey.Modifiers) -RequireRight ([bool]$pressedHotkey.RequireRightModifier))) { return }
         if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
 
         if ($global:CR_ActiveAutomation -eq $pipeline.Id) {
@@ -4473,6 +4525,7 @@ $hotkeyAction = {
             $global:CR_PipelineStepConfirmed   = $false
             $global:CR_PipelineStepDescription = ''
             Hide-StepMarker
+            $global:CR_StepConfirmEnabled = ($isStepRun -and $global:CR_StepConfirmAllowed)
             Register-PipelineStepHotkey
 
             $timer.Stop()
@@ -4485,6 +4538,8 @@ $hotkeyAction = {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] STARTED -> $($target.Title)" -ForegroundColor Green
                 if ($global:CR_StepConfirmEnabled) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Step-confirm mode is ON - press $StepConfirmDisplay each time to let the next input through." -ForegroundColor Cyan
+                } else {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Automatic mode - running all steps without confirmation." -ForegroundColor Cyan
                 }
                 Set-RelayStatus "-> $($target.Title) : [$($pipeline.Name)] starting..." ([System.Drawing.Color]::Lime)
                 if ($null -ne $pipeline.Screen1Select -and -not [string]::IsNullOrEmpty($pipeline.Screen1Select.CalibrationNote)) {

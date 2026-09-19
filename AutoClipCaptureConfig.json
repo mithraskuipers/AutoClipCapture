@@ -67,6 +67,12 @@
                                          "Display":  "Ctrl+Shift+M",
                                          "RequireRightModifier":  false
                                      },
+                          "StepHotkey":  {
+                                             "Modifiers":  6,
+                                             "Key":  78,
+                                             "Display":  "Ctrl+Shift+N",
+                                             "RequireRightModifier":  false
+                                         },
                           "UseFocusedWindow":  true,
                           "ComponentList":  {
                                                 "Enabled":  false,
@@ -87,6 +93,7 @@
                                                 "ClickColumnOffset":  -2,
                                                 "SelectionText":  "B",
                                                 "RowsPerPage":  25,
+                                                "StartRowOffset":  1,
                                                 "PageNextToken":  "{F8}",
                                                 "PageNextDisplay":  "F8",
                                                 "EndOfListText":  "Bottom of List",
