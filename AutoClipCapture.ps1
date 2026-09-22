@@ -1806,9 +1806,15 @@ function Get-Screen1FixedRows {
     $firstLine = [int]$Screen1Select.FirstDataRowLineIndex
     $col       = [int]$Screen1Select.SelectionColumnIndex
     $count     = [int]$Screen1Select.RowsPerPage
-    # Shift the whole grid down by StartRowOffset lines (default 1) so the
-    # first click lands one row lower than FirstDataRowLineIndex itself.
-    $startOffset = 1
+    # FirstDataRowLineIndex is ALREADY the real, calibrated line of the
+    # first data row (CalibrateScreen1Auto.ps1 finds the actual "COB"
+    # line via Ctrl+C and uses it as-is - see the note next to
+    # $realLineIndex above). StartRowOffset is only a manual fine-tune
+    # knob on top of that and defaults to 0 - do NOT default this to 1,
+    # that used to double-apply the correction CalibrateScreen1Auto.ps1
+    # already made and caused every row to land one row too low
+    # (starting on the second COB row instead of the first).
+    $startOffset = 0
     if ($Screen1Select.PSObject.Properties.Name -contains 'StartRowOffset' -and $null -ne $Screen1Select.StartRowOffset) {
         $startOffset = [int]$Screen1Select.StartRowOffset
     }
@@ -1930,6 +1936,21 @@ function Invoke-PipelineScreen1Tick {
             }
 
             Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - selecting" ([System.Drawing.Color]::Lime)
+
+            # Defensive: blank the Command line BEFORE touching the row.
+            # REPOLIST gives the top Command field priority over a row's
+            # line-command letter - if Command still holds leftover text
+            # (typed manually at some point and never cleared/submitted),
+            # the Enter below resubmits it too and the whole screen comes
+            # back as "Invalid REPOLIST Command", with the "B" silently
+            # dropped. {HOME} moves the cursor to the screen's first
+            # input field (the Command line on this panel); {DEL} is the
+            # 3270 "Erase EOF" function, which blanks from the cursor to
+            # the end of that field. If your emulator maps Erase EOF to a
+            # different key than Delete, swap it in here.
+            [System.Windows.Forms.SendKeys]::SendWait('{HOME}{DEL}')
+            Start-Sleep -Milliseconds 20
+
             Invoke-Screen1RowClick -ScreenPoint $screenPt
             Start-Sleep -Milliseconds 20
             [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText + '{ENTER}')
@@ -2648,7 +2669,7 @@ function Add-PipelineScreen1SelectDefaults {
         ClickColumnOffset  = -2
         SelectionText      = 'B'
         RowsPerPage        = 25
-        StartRowOffset     = 1
+        StartRowOffset     = 0
         PageNextToken      = '{F8}'
         PageNextDisplay    = 'F8'
         EndOfListText      = 'Bottom of List'

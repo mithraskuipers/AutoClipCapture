@@ -93,7 +93,7 @@
                                                 "ClickColumnOffset":  -2,
                                                 "SelectionText":  "B",
                                                 "RowsPerPage":  25,
-                                                "StartRowOffset":  1,
+                                                "StartRowOffset":  0,
                                                 "PageNextToken":  "{F8}",
                                                 "PageNextDisplay":  "F8",
                                                 "EndOfListText":  "Bottom of List",
