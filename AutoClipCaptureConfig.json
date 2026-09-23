@@ -100,6 +100,7 @@
                                                 "DupDetectThreshold":  0.995,
                                                 "MaxPages":  500,
                                                 "MaxRowRetries":  3,
+                                                "InvalidCommandText":  "Invalid REPOLIST Command",
                                                 "LogScreen2Text":  true,
                                                 "OutputFileName":  "pipeline_component_versions.txt",
                                                 "CalibrationNote":  "Auto-calibrated 2026-09-15 23:28:30 assuming 100% Windows display scaling. Recalibrate if display scaling, the terminal\u0027s font size, or (if the emulator scales its content) the window size changes."

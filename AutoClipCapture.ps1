@@ -1800,12 +1800,12 @@ public static class CR_DpiAwareness {
 # here at all: every page gets literally the same LineIndex/ColIndex
 # list, because the header above the list is always the same size.
 function Get-Screen1FixedRows {
-    param($Screen1Select)
+    param($Screen1Select, [int]$RowCount = -1)
 
     $rows = New-Object System.Collections.Generic.List[object]
     $firstLine = [int]$Screen1Select.FirstDataRowLineIndex
     $col       = [int]$Screen1Select.SelectionColumnIndex
-    $count     = [int]$Screen1Select.RowsPerPage
+    $count     = if ($RowCount -ge 0) { $RowCount } else { [int]$Screen1Select.RowsPerPage }
     # FirstDataRowLineIndex is ALREADY the real, calibrated line of the
     # first data row (CalibrateScreen1Auto.ps1 finds the actual "COB"
     # line via Ctrl+C and uses it as-is - see the note next to
@@ -1828,6 +1828,30 @@ function Get-Screen1FixedRows {
     }
 
     return $rows
+}
+
+# REPOSITORY LIST shows its own "Row <first> of <total>" indicator
+# (top-right of the panel). This works out how many real data rows are
+# on the CURRENT page from that indicator, so the last page of a list -
+# which is almost never a full RowsPerPage rows, e.g. 570 total rows
+# over pages of 25 leaves a final page with only 20, not 25 - doesn't
+# get treated as if it had RowsPerPage rows. Falls back to RowsPerPage
+# whenever the indicator can't be found or doesn't shrink the count, so
+# this can only ever trim a page down, never break a normal full page.
+function Get-Screen1RowsOnPage {
+    param(
+        [string]$Text,
+        [int]$RowsPerPage
+    )
+    if ($Text -match 'Row\s+(\d+)\s+of\s+(\d+)') {
+        $first = [int]$Matches[1]
+        $total = [int]$Matches[2]
+        $remaining = $total - $first + 1
+        if ($remaining -gt 0 -and $remaining -lt $RowsPerPage) {
+            return $remaining
+        }
+    }
+    return $RowsPerPage
 }
 
 # Works out the on-screen (screen-coordinate) point for one row slot,
@@ -1893,12 +1917,40 @@ function Invoke-PipelineScreen1Tick {
                 return
             }
 
-            # Fixed row slots - pure arithmetic, no Ctrl+C/clipboard
-            # read needed at all to find them.
-            $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1
-            $global:CR_PipelineComponentIdx  = 0
-            $global:CR_PipelineState = 'CompZoom_Action'
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            # Read the page's own "Row <first> of <total>" indicator
+            # before assuming it's a full RowsPerPage rows - matters if
+            # the pipeline is started while already sitting on a
+            # partial (typically the very last) page.
+            [System.Windows.Forms.SendKeys]::SendWait('^c')
+            $global:CR_PipelineState = 'CompScan_Copy'
             $global:CR_ElapsedMs     = 0
+        }
+
+        'CompScan_Copy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                        $text = [System.Windows.Forms.Clipboard]::GetText()
+                    }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed: $_" -ForegroundColor Yellow
+                }
+                [void](Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name)
+
+                $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
+                $global:CR_PipelineScreen1PrevPageText = $text
+                $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1 -RowCount $rowCount
+                $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineState = 'CompZoom_Action'
+                $global:CR_ElapsedMs     = 0
+            }
         }
 
         'CompZoom_Action' {
@@ -1997,13 +2049,37 @@ function Invoke-PipelineScreen1Tick {
                     $global:CR_ElapsedMs     = 0
                 }
                 elseif ($detected -eq 1) {
-                    # Still on Screen 1 - this row's selection field
-                    # didn't lead anywhere (blank row, or the item is
-                    # unavailable). Nothing to go "back" from - just
-                    # move on to the next row.
-                    $global:CR_PipelineScreen1RetryCount = 0
-                    $global:CR_PipelineState = 'CompNext_Action'
-                    $global:CR_ElapsedMs     = 0
+                    $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
+                    if ($rejected) {
+                        # Not a blank row - REPOLIST rejected the whole
+                        # screen because the Command line still held
+                        # something when Enter went through (typically
+                        # left over from an earlier manual command), so
+                        # the "B" never actually got submitted. Retry
+                        # the same row - CompZoom_Action re-attempts the
+                        # Command-line clear every time it runs - rather
+                        # than silently treating it as blank and moving on.
+                        $global:CR_PipelineScreen1RetryCount++
+                        $maxRetries = [int]$s1.MaxRowRetries
+                        if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) on page $($global:CR_PipelineScreen1PageIdx + 1) was rejected ('$($s1.InvalidCommandText)') $maxRetries time(s) in a row - skipping it. The Command line likely needs clearing by hand once, then restart the pipeline." -ForegroundColor Red
+                            $global:CR_PipelineScreen1RetryCount = 0
+                            $global:CR_PipelineState = 'CompNext_Action'
+                        } else {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) rejected by REPOLIST (stray Command-line text) - retrying ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
+                            $global:CR_PipelineState = 'CompZoom_Action'
+                        }
+                        $global:CR_ElapsedMs = 0
+                    } else {
+                        # Genuinely still on Screen 1 with no rejection
+                        # banner - this row's selection field didn't
+                        # lead anywhere (blank row, or the item is
+                        # unavailable). Nothing to go "back" from - just
+                        # move on to the next row.
+                        $global:CR_PipelineScreen1RetryCount = 0
+                        $global:CR_PipelineState = 'CompNext_Action'
+                        $global:CR_ElapsedMs     = 0
+                    }
                 }
                 else {
                     # Unrecognized screen (e.g. the terminal hadn't
@@ -2104,12 +2180,14 @@ function Invoke-PipelineScreen1Tick {
                     return
                 }
 
-                # Text was only needed for the end-of-list/duplicate
-                # check just above - row positions are the same fixed
-                # slots on every page, so just rebuild them directly.
+                # Row positions are the same fixed slots on every page,
+                # but how MANY of those slots actually hold data can be
+                # less than RowsPerPage on the last page - read it back
+                # off the panel's own "Row X of Y" indicator.
+                $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1PageIdx++
-                $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1
+                $global:CR_PipelineScreen1Rows   = Get-Screen1FixedRows -Screen1Select $s1 -RowCount $rowCount
                 $global:CR_PipelineComponentIdx  = 0
                 $global:CR_PipelineState = 'CompZoom_Action'
                 $global:CR_ElapsedMs     = 0
@@ -2676,6 +2754,7 @@ function Add-PipelineScreen1SelectDefaults {
         DupDetectThreshold = 0.995
         MaxPages           = 500
         MaxRowRetries      = 3
+        InvalidCommandText = 'Invalid REPOLIST Command'
         LogScreen2Text     = $true
         OutputFileName     = 'pipeline_component_versions.txt'
         CalibrationNote    = 'Not calibrated yet - run StartAutoClipCapture.bat Calibrate (or CalibrateScreen1AutoGuided.bat, if you still use that one).'
