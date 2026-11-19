@@ -1141,8 +1141,11 @@ function Invoke-Screen1CalibrationTool {
    2. Scans it row by row and column by column for the largest solid
       dark rectangle - that's the terminal grid, as opposed to the
       lighter menu/toolbar/status-bar chrome around it.
-   3. Divides that rectangle's pixel width/height by the known fixed
-      grid (80 columns x 32 rows) to get CharWidthPx/CharHeightPx -
+   3. Inspects copied text dimensions as a clue, then asks for the
+      emulator's actual visible grid dimensions. Clipboard text can omit
+      blank rows, headers, or columns, so it is never treated as truth.
+      The detected terminal rectangle divided by those dimensions gives
+      CharWidthPx/CharHeightPx -
       measured from the ACTUAL terminal area only, unlike
       CalibrateScreen1AutoGuided.ps1's original approach of dividing
       the WHOLE window client area by 80x32 (which silently counted
@@ -1437,8 +1440,6 @@ if ($targets.Count -gt 1) {
 # turned out to be. The preview below now does exactly the same thing,
 # so there's no separate row/column guess left to go stale.
 $clickColumnOffset = -2
-$cols = 80
-$rows = 32
 $chosenPipeline.Screen1Select.ClickColumnOffset = $clickColumnOffset
 
 Write-Host "`nMake sure your terminal window is open, fully visible, and NOT covered by another window." -ForegroundColor Cyan
@@ -1464,6 +1465,8 @@ if ($null -eq $bmp) {
     pause
     exit 1
 }
+$calibrationClientWidth = $bmp.Width
+$calibrationClientHeight = $bmp.Height
 
 $box = Find-DarkRectangle -Bmp $bmp
 $bmp.Dispose()
@@ -1475,40 +1478,6 @@ if ($null -eq $box -or ($box.Right - $box.Left) -lt 100 -or ($box.Bottom - $box.
     pause
     exit 1
 }
-
-$boxWidth  = $box.Right - $box.Left
-$boxHeight = $box.Bottom - $box.Top
-$CharWidthPx  = [math]::Round(($boxWidth / $cols), 2)
-$CharHeightPx = [math]::Round(($boxHeight / $rows), 2)
-
-# Sanity-check the measured cell size against plausible terminal font
-# dimensions, so a bad detection (e.g. it found some other dark UI
-# panel instead of the actual terminal) gets caught here instead of
-# silently producing bad click coordinates later.
-if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $CharHeightPx -gt 50) {
-    Write-Host "`nDetected rectangle is $boxWidth x $boxHeight px, giving an implausible char size" -ForegroundColor Red
-    Write-Host "($CharWidthPx x $CharHeightPx px). That's probably not the terminal grid." -ForegroundColor Red
-    Write-Host "Use CalibrateScreen1AutoGuided.bat instead." -ForegroundColor Yellow
-    pause
-    exit 1
-}
-
-# Row-0/column-0 origin (cell CENTER), matching the exact convention
-# AutoClipCaptureSqlPipelineScreen1.ps1's click formula expects:
-#   ClientX = OriginX + Col * CharWidthPx
-#   ClientY = OriginY + Row * CharHeightPx
-$OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
-$OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
-
-Write-Host ""
-Write-Host "=====================================================" -ForegroundColor Yellow
-Write-Host " Detected" -ForegroundColor Yellow
-Write-Host "=====================================================" -ForegroundColor Yellow
-Write-Host ("  Terminal box   = {0}x{1} px (at client offset {2},{3})" -f $boxWidth, $boxHeight, $box.Left, $box.Top)
-Write-Host ("  OriginX        = {0}" -f $OriginX)
-Write-Host ("  OriginY        = {0}" -f $OriginY)
-Write-Host ("  CharWidthPx    = {0}" -f $CharWidthPx)
-Write-Host ("  CharHeightPx   = {0}" -f $CharHeightPx)
 
 # ---- Find the REAL first "COB" row on whatever screen is showing
 # right now, instead of assuming a fixed row/column - this is the part
@@ -1539,16 +1508,41 @@ if ($null -eq $cobMatch) {
     pause
     exit 1
 }
-Write-Host ("  First 'COB' found at line {0}, column {1}: `"{2}`"" -f $cobMatch.LineIndex, $cobMatch.ColIndex, $cobMatch.LineText.Trim()) -ForegroundColor Cyan
+$clipboardLines = $copiedText -split "`r`n|`n|`r"
+$clipboardWidths = @($clipboardLines | ForEach-Object { $_.Length } | Sort-Object -Unique)
+$clipboardMinWidth = ($clipboardLines | ForEach-Object { $_.Length } | Measure-Object -Minimum).Minimum
+$clipboardMaxWidth = ($clipboardLines | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+Write-Host ("  Clipboard clue: {0} lines, line widths {1}-{2} characters ({3} distinct widths)." -f $clipboardLines.Count, $clipboardMinWidth, $clipboardMaxWidth, $clipboardWidths.Count) -ForegroundColor DarkCyan
+Write-Host ("  'COB' appears in clipboard line {0}, column {1}: `"{2}`"" -f $cobMatch.LineIndex, $cobMatch.ColIndex, $cobMatch.LineText.Trim()) -ForegroundColor Cyan
+Write-Host "Clipboard dimensions can omit leading blank rows, headers, or columns. Use the visible emulator grid and the matching COB row below." -ForegroundColor Yellow
+$cols = Read-Host "Enter the terminal's visible character columns (from Host On-Demand session/grid settings)"
+$rows = Read-Host "Enter the terminal's visible character rows"
+$parsedCols = 0; $parsedRows = 0
+if (-not [int]::TryParse([string]$cols, [ref]$parsedCols) -or -not [int]::TryParse([string]$rows, [ref]$parsedRows) -or $parsedCols -le 0 -or $parsedRows -le 0) {
+    Write-Host "Invalid grid dimensions. Nothing changed." -ForegroundColor Red; pause; exit 1
+}
+$cols = $parsedCols; $rows = $parsedRows
+$boxWidth  = $box.Right - $box.Left
+$boxHeight = $box.Bottom - $box.Top
+$CharWidthPx  = [math]::Round(($boxWidth / $cols), 2)
+$CharHeightPx = [math]::Round(($boxHeight / $rows), 2)
+if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $CharHeightPx -gt 50) {
+    Write-Host "Detected terminal is $boxWidth x $boxHeight px; these dimensions imply an implausible cell size ($CharWidthPx x $CharHeightPx px). Nothing changed." -ForegroundColor Red; pause; exit 1
+}
+$screenRow = Read-Host ("Enter the visible 0-based screen row for this first COB data row (clipboard line was {0})" -f $cobMatch.LineIndex)
+$screenCol = Read-Host ("Enter the visible 0-based screen column where COB begins (clipboard column was {0})" -f $cobMatch.ColIndex)
+$parsedScreenRow = -1; $parsedScreenCol = -1
+if (-not [int]::TryParse([string]$screenRow, [ref]$parsedScreenRow) -or -not [int]::TryParse([string]$screenCol, [ref]$parsedScreenCol) -or $parsedScreenRow -lt 0 -or $parsedScreenRow -ge $rows -or $parsedScreenCol -lt 0 -or $parsedScreenCol -ge $cols) {
+    Write-Host "The visible COB row/column is outside the terminal grid. Nothing changed." -ForegroundColor Red; pause; exit 1
+}
+$realLineIndex = $parsedScreenRow
+$calibratedCobColumn = $parsedScreenCol
+$OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
+$OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
+Write-Host ("  Terminal box = {0}x{1} px at ({2},{3}); grid = {4} columns x {5} rows; cell = {6}x{7} px" -f $boxWidth,$boxHeight,$box.Left,$box.Top,$cols,$rows,$CharWidthPx,$CharHeightPx) -ForegroundColor Cyan
 
-# NOTE: previously corrected by +1 here on the assumption the raw
-# detected line sits one row ABOVE the true first data row. In
-# practice that made the real pipeline land one row BELOW the true
-# first data row (starting on the second COB row instead of the
-# first), so the raw detected line index is used as-is.
-$realLineIndex = $cobMatch.LineIndex
-
-$targetColIndex = $cobMatch.ColIndex + $clickColumnOffset
+$targetColIndex = $calibratedCobColumn + $clickColumnOffset
+if ($targetColIndex -lt 0 -or $targetColIndex -ge $cols) { Write-Host "Selection field would be outside terminal columns. Nothing changed." -ForegroundColor Red; pause; exit 1 }
 $confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
 $confirmY = $OriginY + ($realLineIndex * $CharHeightPx)
 
@@ -1556,6 +1550,9 @@ $pt = New-Object POINT2
 $pt.X = [int][math]::Round($confirmX)
 $pt.Y = [int][math]::Round($confirmY)
 [void][CalibNative4]::ClientToScreen($targetHandle, [ref]$pt)
+if ($confirmX -lt ($box.Left + 0.5) -or $confirmX -ge ($box.Right - 0.5) -or $confirmY -lt ($box.Top + 0.5) -or $confirmY -ge ($box.Bottom - 0.5)) {
+    Write-Host "Computed calibration point is outside the detected terminal area. Nothing changed." -ForegroundColor Red; pause; exit 1
+}
 [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($pt.X, $pt.Y)
 
 Write-Host ""
@@ -1577,6 +1574,22 @@ $chosenPipeline.Screen1Select.OriginX = $OriginX
 $chosenPipeline.Screen1Select.OriginY = $OriginY
 $chosenPipeline.Screen1Select.CharWidthPx = $CharWidthPx
 $chosenPipeline.Screen1Select.CharHeightPx = $CharHeightPx
+foreach ($geometry in @(
+    @{ Name = 'TerminalLeft'; Value = [int]$box.Left },
+    @{ Name = 'TerminalTop'; Value = [int]$box.Top },
+    @{ Name = 'TerminalWidth'; Value = [int]$boxWidth },
+    @{ Name = 'TerminalHeight'; Value = [int]$boxHeight },
+    @{ Name = 'TerminalColumns'; Value = [int]$cols },
+    @{ Name = 'TerminalRows'; Value = [int]$rows },
+    @{ Name = 'CalibrationClientWidth'; Value = [int]$calibrationClientWidth },
+    @{ Name = 'CalibrationClientHeight'; Value = [int]$calibrationClientHeight }
+)) {
+    if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains $geometry.Name)) {
+        $chosenPipeline.Screen1Select | Add-Member -NotePropertyName $geometry.Name -NotePropertyValue $geometry.Value -Force
+    } else {
+        $chosenPipeline.Screen1Select.($geometry.Name) = $geometry.Value
+    }
+}
 
 # These two are now the permanent, fixed row/column constants the real
 # pipeline uses for EVERY row on EVERY page (no more per-row text
@@ -1587,7 +1600,7 @@ $chosenPipeline.Screen1Select.CharHeightPx = $CharHeightPx
 # (COB/ASM) starts - the selection field itself is ColIndex + ClickColumnOffset.
 foreach ($prop in @(
     @{ Name = 'FirstDataRowLineIndex'; Value = $realLineIndex },
-    @{ Name = 'SelectionColumnIndex';  Value = $cobMatch.ColIndex  }
+    @{ Name = 'SelectionColumnIndex';  Value = $calibratedCobColumn }
 )) {
     if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains $prop.Name)) {
         $chosenPipeline.Screen1Select | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
@@ -1596,7 +1609,7 @@ foreach ($prop in @(
     }
 }
 
-$calibNote = "Auto-calibrated {0} assuming 100% Windows display scaling AND that the header above the list is always exactly this many lines. Recalibrate if display scaling, the terminal's font size, the window size, or the header's line count changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+$calibNote = "Auto-calibrated {0} using detected terminal bounds and a visible COB row. Clipboard dimensions were diagnostic only. Recalibrate if display scaling, terminal size, font, or layout changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote')) {
     $chosenPipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $calibNote -Force
 } else {
@@ -1878,8 +1891,25 @@ function Get-Screen1RowScreenPoint {
     # DPI-awareness already produces correct real-pixel coordinates
     # (single monitor, 100% Windows scaling), so this math is now
     # IDENTICAL to what CalibrateScreen1Auto.ps1's own preview computes.
+    if ($null -eq $Screen1Select.TerminalLeft -or $null -eq $Screen1Select.TerminalTop -or
+        $null -eq $Screen1Select.TerminalWidth -or $null -eq $Screen1Select.TerminalHeight -or
+        $null -eq $Screen1Select.TerminalColumns -or $null -eq $Screen1Select.TerminalRows -or
+        $null -eq $Screen1Select.CalibrationClientWidth -or $null -eq $Screen1Select.CalibrationClientHeight) { return $null }
+
+    $clientRect = New-Object RECT
+    [void][Win32]::GetClientRect($Handle, [ref]$clientRect)
+    if (($clientRect.Right - $clientRect.Left) -ne [int]$Screen1Select.CalibrationClientWidth -or
+        ($clientRect.Bottom - $clientRect.Top) -ne [int]$Screen1Select.CalibrationClientHeight) { return $null }
+    if ($LineIndex -lt 0 -or $LineIndex -ge [int]$Screen1Select.TerminalRows -or
+        $targetColIndex -lt 0 -or $targetColIndex -ge [int]$Screen1Select.TerminalColumns) { return $null }
+
     $clientX = [double]$Screen1Select.OriginX + ($targetColIndex * [double]$Screen1Select.CharWidthPx)
     $clientY = [double]$Screen1Select.OriginY + ($LineIndex * [double]$Screen1Select.CharHeightPx)
+    $left = [double]$Screen1Select.TerminalLeft
+    $top = [double]$Screen1Select.TerminalTop
+    $right = $left + [double]$Screen1Select.TerminalWidth
+    $bottom = $top + [double]$Screen1Select.TerminalHeight
+    if ($clientX -lt $left -or $clientX -ge $right -or $clientY -lt $top -or $clientY -ge $bottom) { return $null }
 
     $pt = New-Object POINT
     $pt.X = [int][math]::Round($clientX)
@@ -1964,14 +1994,22 @@ function Invoke-PipelineScreen1Tick {
             $rowIdx = [int]$global:CR_PipelineComponentIdx
             $row = $global:CR_PipelineScreen1Rows[$rowIdx]
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibrated terminal bounds no longer match the target point or window size. Recalibrate after terminal resize/font changes; stopping before click." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "TERMINAL CALIBRATION STALE - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
 
             if (-not $global:CR_PipelineStepPending) {
                 $wr = New-Object RECT
                 [void][Win32]::GetWindowRect($global:CR_TargetHandle, [ref]$wr)
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1): LineIndex=$($row.LineIndex) ColIndex=$($row.ColIndex) -> click ($($screenPt.X),$($screenPt.Y))  |  Screen1Select Origin=($($s1.OriginX),$($s1.OriginY)) CharSize=$($s1.CharWidthPx)x$($s1.CharHeightPx)  |  Target window bounds ($($wr.Left),$($wr.Top))-($($wr.Right),$($wr.Bottom))" -ForegroundColor DarkGray
-                if ($screenPt.X -lt $wr.Left -or $screenPt.X -gt $wr.Right -or $screenPt.Y -lt $wr.Top -or $screenPt.Y -gt $wr.Bottom) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] WARNING: that click point is OUTSIDE the target window's bounds - Screen1Select needs recalibrating (StartAutoClipCapture.bat Calibrate)." -ForegroundColor Red
+                if ($screenPt.X -lt $wr.Left -or $screenPt.X -ge $wr.Right -or $screenPt.Y -lt $wr.Top -or $screenPt.Y -ge $wr.Bottom) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Click point is outside target window bounds. Stopping before click; recalibrate." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
                 }
             }
 
@@ -1983,6 +2021,25 @@ function Invoke-PipelineScreen1Tick {
 
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+
+            # Recompute after foregrounding and immediately before input:
+            # restoring/moving the Host On-Demand window while the step
+            # confirmation is open must never leave a stale click point.
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Terminal geometry changed while awaiting confirmation. Recalibrate; stopping before click." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "TERMINAL CALIBRATION STALE - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+            $wr = New-Object RECT
+            [void][Win32]::GetWindowRect($global:CR_TargetHandle, [ref]$wr)
+            if ($screenPt.X -lt $wr.Left -or $screenPt.X -ge $wr.Right -or $screenPt.Y -lt $wr.Top -or $screenPt.Y -ge $wr.Bottom) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Click point is outside target window bounds after activation. Stopping before click; recalibrate." -ForegroundColor Red
                 Stop-PipelineCapture
                 return
             }
@@ -2885,6 +2942,9 @@ public static class Win32
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
     [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int X, int Y);
 
     [DllImport("user32.dll")]
@@ -3240,7 +3300,7 @@ foreach ($p in $PipelineConfigs) {
 # further down) since both call it.
 function Test-Screen1Calibrated {
     param($Screen1Select)
-    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0 -and $null -ne $Screen1Select.FirstDataRowLineIndex -and $null -ne $Screen1Select.SelectionColumnIndex)
+    return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0 -and $null -ne $Screen1Select.FirstDataRowLineIndex -and $null -ne $Screen1Select.SelectionColumnIndex -and $null -ne $Screen1Select.TerminalLeft -and $null -ne $Screen1Select.TerminalTop -and $null -ne $Screen1Select.TerminalWidth -and $null -ne $Screen1Select.TerminalHeight -and $null -ne $Screen1Select.TerminalColumns -and $null -ne $Screen1Select.TerminalRows -and $null -ne $Screen1Select.CalibrationClientWidth -and $null -ne $Screen1Select.CalibrationClientHeight)
 }
 
 # ---- Top-left status overlay: a tiny always-on-top banner that never
