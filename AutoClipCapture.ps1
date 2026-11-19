@@ -250,6 +250,39 @@ $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 # version - it's just wrapped in a function now instead of being a
 # top-level script.
 #=====================================================================
+function Get-DefaultPipelineTimingsMs {
+    [pscustomobject]@{
+        RepositoryList = [pscustomobject]@{
+            BeforeClickMs = 0
+            AfterClickMs = 1000
+            AfterSelectionLetterMs = 1000
+            AfterEnterMs = 1000
+            AfterClipboardCopyMs = 1000
+            InitialScanAfterClipboardCopyMs = 250
+            AfterPageKeyMs = 1000
+            AfterDeleteMs = 1000
+            AfterF3Ms = 1000
+        }
+        ComponentVersion = [pscustomobject]@{
+            BeforeClickMs = 0
+            AfterClickMs = 1000
+            AfterSelectionLetterMs = 1000
+            AfterEnterMs = 1000
+            AfterClipboardCopyMs = 1000
+            AfterF3Ms = 1000
+        }
+        SourceCode = [pscustomobject]@{
+            AfterActionKeyMs = 250
+            AfterClipboardCopyMs = 250
+            AfterF3Ms = 1000
+        }
+        ComponentList = [pscustomobject]@{
+            AfterPageKeyMs = 250
+            AfterClipboardCopyMs = 250
+        }
+    }
+}
+
 function Show-ConfigEditorGui {
 <#
 =====================================================================
@@ -320,39 +353,6 @@ function Get-DefaultSqlSearchMode {
         TerminalText        = "*Bottom of data reached*"
         NotFoundOverlayText = "NO SQL FOUND"
         MaxIterations       = 500
-    }
-}
-
-function Get-DefaultPipelineTimingsMs {
-    [pscustomobject]@{
-        RepositoryList = [pscustomobject]@{
-            BeforeClickMs = 0
-            AfterClickMs = 1000
-            AfterSelectionLetterMs = 1000
-            AfterEnterMs = 1000
-            AfterClipboardCopyMs = 1000
-            InitialScanAfterClipboardCopyMs = 250
-            AfterPageKeyMs = 1000
-            AfterDeleteMs = 1000
-            AfterF3Ms = 1000
-        }
-        ComponentVersion = [pscustomobject]@{
-            BeforeClickMs = 0
-            AfterClickMs = 1000
-            AfterSelectionLetterMs = 1000
-            AfterEnterMs = 1000
-            AfterClipboardCopyMs = 1000
-            AfterF3Ms = 1000
-        }
-        SourceCode = [pscustomobject]@{
-            AfterActionKeyMs = 250
-            AfterClipboardCopyMs = 250
-            AfterF3Ms = 1000
-        }
-        ComponentList = [pscustomobject]@{
-            AfterPageKeyMs = 250
-            AfterClipboardCopyMs = 250
-        }
     }
 }
 
