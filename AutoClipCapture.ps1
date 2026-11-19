@@ -1875,9 +1875,77 @@ function Get-Screen1RowsThroughLastCob {
             LineIndex = $screenRow
             ColIndex  = $selectionColumn
             HasCob    = $cobLines.ContainsKey([int]$clipboardLine)
+            ClipboardLineIndex = [int]$clipboardLine
+            LineText = [string]$lines[$clipboardLine]
         })
     }
     return $rows
+}
+
+# Record row-specific failures with the complete repository row from the
+# clipboard, then recover to REPOSITORY LIST and resume at the next row.
+function Skip-PipelineRowAfterFailure {
+    param(
+        [Parameter(Mandatory)][string]$Reason,
+        [string]$ObservedText = '',
+        [switch]$RepositoryListCommandMayBePresent
+    )
+
+    $pipeline = $global:CR_ActivePipelineConfig
+    $rowIndex = [int]$global:CR_PipelineComponentIdx
+    $row = $null
+    if ($rowIndex -ge 0 -and $rowIndex -lt $global:CR_PipelineScreen1Rows.Count) {
+        $row = $global:CR_PipelineScreen1Rows[$rowIndex]
+    }
+    $rowData = if ($null -ne $row -and $row.PSObject.Properties.Name -contains 'LineText') { [string]$row.LineText } else { '[row text unavailable]' }
+    $screenRow = if ($null -ne $row) { [string]$row.LineIndex } else { '[unknown]' }
+    $cobOrdinal = 0
+    for ($i = 0; $i -le $rowIndex -and $i -lt $global:CR_PipelineScreen1Rows.Count; $i++) {
+        if ([bool]$global:CR_PipelineScreen1Rows[$i].HasCob) { $cobOrdinal++ }
+    }
+    $pageNumber = [int]$global:CR_PipelineScreen1PageIdx + 1
+    $rowNumber = $rowIndex + 1
+    $failurePath = Join-Path $LogDir 'pipeline_failed_rows.txt'
+    $entry = @(
+        "===== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') =====",
+        "Pipeline: $($pipeline.Name)",
+        "Repository page: $pageNumber; COB number on page: $cobOrdinal; row slot: $rowNumber; screen row: $screenRow",
+        "Failure: $Reason",
+        "Repository row data: $rowData"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ObservedText)) {
+        $entry += 'Observed screen clipboard text:'
+        $entry += $ObservedText
+    }
+    $entry += ''
+    if (-not $global:CR_PipelineFailureRowLogged) {
+        try {
+            Add-Content -LiteralPath $failurePath -Value $entry -Encoding UTF8
+            $global:CR_PipelineFailureRowLogged = $true
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Logged failed repository row $rowNumber to $failurePath" -ForegroundColor Yellow
+        } catch {
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not write failed-row log '$failurePath': $_" -ForegroundColor Red
+        }
+    }
+
+    $global:CR_PipelineScreen1RetryCount = 0
+    $global:CR_PipelineStepPending = $false
+    $global:CR_PipelineStepConfirmed = $false
+    $global:CR_PipelineStepDescription = ''
+    Hide-StepMarker
+    if ($RepositoryListCommandMayBePresent -or [int]$global:CR_PipelineCurrentScreen -eq 1) {
+        if ($RepositoryListCommandMayBePresent) {
+            $global:CR_PipelineState = 'CompReject_Action'
+        } else {
+            $global:CR_PipelineState = 'CompNext_Action'
+        }
+    } else {
+        $global:CR_PipelineAfterBack = 'CompNext_Action'
+        $global:CR_PipelineBackRetryCount = 0
+        $global:CR_PipelineState = 'Back_Action'
+    }
+    $global:CR_ElapsedMs = 0
+    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Row $rowNumber failed; returning to REPOSITORY LIST and continuing" ([System.Drawing.Color]::Orange)
 }
 
 # REPOSITORY LIST shows its own "Row <first> of <total>" indicator
@@ -2020,6 +2088,7 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
                 $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineFailureRowLogged = $false
                 $cobCount = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob }).Count
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Repository page $($global:CR_PipelineScreen1PageIdx + 1): found $cobCount COB row(s) across $($global:CR_PipelineScreen1Rows.Count) row slot(s) through the last COB." -ForegroundColor DarkCyan
                 $global:CR_PipelineState = if ($global:CR_PipelineScreen1Rows.Count -gt 0) { 'CompZoom_Action' } else { 'CompNext_Action' }
@@ -2113,8 +2182,7 @@ function Invoke-PipelineScreen1Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before typing B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
                     return
                 }
                 [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
@@ -2127,8 +2195,7 @@ function Invoke-PipelineScreen1Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterSelectionLetterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before pressing Enter after B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
                     return
                 }
                 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
@@ -2141,8 +2208,7 @@ function Invoke-PipelineScreen1Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterEnterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable while waiting for COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
                     return
                 }
                 [System.Windows.Forms.SendKeys]::SendWait('^c')
@@ -2180,11 +2246,9 @@ function Invoke-PipelineScreen1Tick {
                     $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
                     $topRightChanged = Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen1PrevPageText -After $text
                     if ($rejected -or $topRightChanged) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST stayed open and its top-right message changed after B/Enter for row $($global:CR_PipelineComponentIdx + 1). Removing B from that row and advancing without F3." -ForegroundColor Yellow
-                        $global:CR_PipelineState = 'CompReject_Action'
-                        $global:CR_PipelineStepPending = $false
-                        $global:CR_PipelineStepConfirmed = $false
-                        $global:CR_ElapsedMs = 0
+                        $reason = 'REPOSITORY LIST stayed open and its top-right message changed after B/Enter.'
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Removing B, logging the row, and continuing." -ForegroundColor Yellow
+                        Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text -RepositoryListCommandMayBePresent
                     } else {
                         # Enter should have opened COMPONENT VERSION. Keep
                         # checking this same page briefly for a delayed
@@ -2195,9 +2259,9 @@ function Invoke-PipelineScreen1Tick {
                         $global:CR_PipelineScreen1RetryCount++
                         $maxRetries = [int]$s1.MaxRowRetries
                         if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter for row $($global:CR_PipelineComponentIdx + 1). COMPONENT VERSION did not appear; stopping without advancing." -ForegroundColor Red
-                            Show-RelayResultOverlay -Text "COMPONENT VERSION NOT OPENED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                            Stop-PipelineCapture
+                            $reason = 'COMPONENT VERSION did not open after B/Enter; REPOSITORY LIST remained visible.'
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Removing B, logging the row, and continuing." -ForegroundColor Yellow
+                            Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text -RepositoryListCommandMayBePresent
                             return
                         }
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter; checking again before advancing ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
@@ -2213,9 +2277,9 @@ function Invoke-PipelineScreen1Tick {
                     $global:CR_PipelineScreen1RetryCount++
                     $maxRetries = [int]$s1.MaxRowRetries
                     if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) opened an unrecognized page after Enter. Stopping without clicking or advancing." -ForegroundColor Red
-                        Show-RelayResultOverlay -Text "UNRECOGNIZED COMPONENT PAGE - STOPPED" -Color ([System.Drawing.Color]::Red)
-                        Stop-PipelineCapture
+                        $reason = 'Unrecognized page appeared after B/Enter.'
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and trying F3 to return to REPOSITORY LIST." -ForegroundColor Yellow
+                        Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
                         return
                     } else {
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unrecognized page after Enter; recapturing without clicking again ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
@@ -2291,6 +2355,7 @@ function Invoke-PipelineScreen1Tick {
             $nextRow = [int]$global:CR_PipelineComponentIdx + 1
             if ($nextRow -lt $global:CR_PipelineScreen1Rows.Count) {
                 $global:CR_PipelineComponentIdx = $nextRow
+                $global:CR_PipelineFailureRowLogged = $false
                 $global:CR_PipelineState = 'CompZoom_Action'
                 $global:CR_ElapsedMs     = 0
             } else {
@@ -2381,6 +2446,7 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_PipelineScreen1PageIdx++
                 $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
                 $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineFailureRowLogged = $false
                 $cobCount = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob }).Count
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Repository page $($global:CR_PipelineScreen1PageIdx + 1): found $cobCount COB row(s) across $($global:CR_PipelineScreen1Rows.Count) row slot(s) through the last COB." -ForegroundColor DarkCyan
                 $global:CR_PipelineState = if ($global:CR_PipelineScreen1Rows.Count -gt 0) { 'CompZoom_Action' } else { 'CompNext_Action' }
@@ -2407,7 +2473,7 @@ function Invoke-PipelineScreen1Tick {
 =====================================================================
  AutoClipCaptureSqlPipelineScreen2.ps1
 
- Screen 2 = COMPONENT VERSION. Log the page and find the unique
+ Screen 2 = COMPONENT VERSION. Log the page and find the topmost
  PROD/UT/ET marker in copied text. Check the selection cell two columns
  to its left: if it already contains S, press Enter without typing;
  otherwise type one S, then press Enter. Clipboard line indices are
@@ -2416,7 +2482,7 @@ function Invoke-PipelineScreen1Tick {
 
  States (start with "Env" so AutoClipCapture.ps1 routes them here):
    EnvLog_Action     - log the captured COMPONENT VERSION page.
-   EnvSelect_Action  - locate the unique PROD/UT/ET marker in copied
+   EnvSelect_Action  - locate the topmost PROD/UT/ET marker in copied
                        text and check its selection cell on screen row 8.
    EnvSelect_TypeWait - only if needed, wait and type one S.
    EnvSelect_EnterWait - wait and press Enter, with or without typing S.
@@ -2465,23 +2531,30 @@ function Invoke-PipelineScreen2Tick {
                     $sourceCandidates += [pscustomobject]@{
                         Match = $match
                         Line = $componentLines[$lineIndex]
+                        LineIndex = $lineIndex
                     }
                 }
             }
-            if ($sourceCandidates.Count -ne 1) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Expected one PROD, UT, or ET source marker in COMPONENT VERSION copied text, found $($sourceCandidates.Count). Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE ROW NOT FOUND - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+            if ($sourceCandidates.Count -eq 0) {
+                $reason = 'No PROD, UT, or ET marker was found in COMPONENT VERSION clipboard text.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
 
+            # Clipboard line order preserves top-to-bottom screen order.
+            # Sort explicitly so the first matching environment row wins.
+            $sourceCandidates = @($sourceCandidates | Sort-Object LineIndex, @{ Expression = { $_.Match.Index } })
+            if ($sourceCandidates.Count -gt 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Found $($sourceCandidates.Count) PROD/UT/ET rows; selecting the topmost marker '$($sourceCandidates[0].Match.Value)' and continuing." -ForegroundColor DarkCyan
+            }
             $sourceMatch = $sourceCandidates[0].Match
             $sourceCol = $sourceMatch.Index - 2
             $sourceRow = 8
             if ($sourceCol -lt 0 -or $sourceCol -ge [int]$s1.TerminalColumns) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Selection column two characters left of $($sourceMatch.Value) on COMPONENT VERSION row 8 is outside the terminal grid. Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = "Selection column two characters left of $($sourceMatch.Value) on COMPONENT VERSION row 8 is outside the terminal grid."
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
 
@@ -2493,9 +2566,9 @@ function Invoke-PipelineScreen2Tick {
                 [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
             )
             if ($existingSelections.Count -gt 1) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 has more than one standalone S before $($sourceMatch.Value). Stopping to avoid submitting an invalid command." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "MULTIPLE S COMMANDS - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = "COMPONENT VERSION row 8 has more than one standalone S before $($sourceMatch.Value); skipped to avoid submitting an invalid command."
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
             if ($existingSelections.Count -eq 1) {
@@ -2508,9 +2581,9 @@ function Invoke-PipelineScreen2Tick {
 
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $sourceRow -ColIndex $sourceCol
             if ($null -eq $pt) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION selection point is outside calibrated terminal bounds. Recalibrate; stopping before S." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = 'COMPONENT VERSION selection point is outside calibrated terminal bounds.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
@@ -2522,15 +2595,14 @@ function Invoke-PipelineScreen2Tick {
             }
 
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                Stop-PipelineCapture
+                $reason = 'Target window was unavailable before selecting the COMPONENT VERSION source row.'
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $sourceRow -ColIndex $sourceCol
             if ($null -eq $pt) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION geometry changed while awaiting confirmation. Recalibrate; stopping before S." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = 'COMPONENT VERSION geometry changed while preparing the source selection.'
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
@@ -2543,8 +2615,7 @@ function Invoke-PipelineScreen2Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterClickMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before typing S.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
                     return
                 }
                 if (-not $global:CR_PipelineSourceSelectionSent) {
@@ -2565,8 +2636,7 @@ function Invoke-PipelineScreen2Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterSelectionLetterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before pressing Enter on COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
                     return
                 }
                 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
@@ -2580,8 +2650,7 @@ function Invoke-PipelineScreen2Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterEnterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable after pressing Enter on COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
                     return
                 }
                 [System.Windows.Forms.SendKeys]::SendWait('^c')
@@ -2605,12 +2674,9 @@ function Invoke-PipelineScreen2Tick {
                 $detected = Update-PipelineScreenTracking -Text $sourceText -PipelineName $pipeline.Name
                 $componentCommandError = ($detected -eq 2) -and (Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen2BeforeSelectionText -After $sourceText)
                 if ($detected -eq 2 -and $componentCommandError) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION stayed open and its top-right message changed after S/Enter. Treating that as a source-selection error; returning to REPOSITORY LIST with one F3." -ForegroundColor Yellow
-                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION command error; returning without source capture" ([System.Drawing.Color]::Orange)
-                    $global:CR_PipelineScreen1RetryCount = 0
-                    $global:CR_PipelineAfterBack = 'CompNext_Action'
-                    $global:CR_PipelineState = 'Back_Action'
-                    $global:CR_ElapsedMs = 0
+                    $reason = 'COMPONENT VERSION top-right error message changed after S/Enter.'
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                    Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
                 } elseif ($detected -eq 3) {
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE verified; starting Auto Capture Current File" ([System.Drawing.Color]::Orange)
                     $global:CR_PipelineSourceCaptureText = $sourceText
@@ -2620,9 +2686,9 @@ function Invoke-PipelineScreen2Tick {
                     $global:CR_PipelineScreen1RetryCount++
                     $maxRetries = [int]$s1.MaxRowRetries
                     if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source-code page was not verified by the row-0 menu text. Stopping without F3." -ForegroundColor Red
-                        Show-RelayResultOverlay -Text "SOURCE CODE NOT VERIFIED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                        Stop-PipelineCapture
+                        $reason = "SOURCE CODE page was not verified by the row-0 menu text (detected screen $detected)."
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                        Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
                         return
                     }
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source-code page not yet verified (detected screen $detected); recapturing without another S or F3 ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
@@ -2633,9 +2699,9 @@ function Invoke-PipelineScreen2Tick {
         }
 
         default {
-            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unknown COMPONENT VERSION state '$($global:CR_PipelineState)' - stopping without F3." -ForegroundColor Red
-            Show-RelayResultOverlay -Text "UNKNOWN COMPONENT STATE - STOPPED" -Color ([System.Drawing.Color]::Red)
-            Stop-PipelineCapture
+            $reason = "Unknown COMPONENT VERSION state '$($global:CR_PipelineState)'."
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and trying to return to REPOSITORY LIST." -ForegroundColor Yellow
+            Skip-PipelineRowAfterFailure -Reason $reason -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
         }
     }
 }
@@ -2666,27 +2732,27 @@ function Invoke-PipelineScreen3Tick {
             $sourceText = [string]$global:CR_PipelineSourceCaptureText
             $baseName = Get-ComponentIdFromText -Text $sourceText
             if ([string]::IsNullOrWhiteSpace($baseName)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] SOURCE CODE is verified, but no BROWSE component identifier was found for Auto Capture Current File. Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE FILE NAME NOT FOUND - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = 'SOURCE CODE was reached, but no BROWSE component identifier was found for Auto Capture Current File.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
                 return
             }
 
             $baseName = Get-SafeFileName $baseName
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($baseName)
             if ([string]::IsNullOrWhiteSpace($baseName)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not make a safe output filename for the source file. Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE FILE NAME INVALID - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = 'Could not make a safe output filename for the source file.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
                 return
             }
 
             foreach ($dir in @($TxtDir, $CblDir)) {
                 if (-not (Test-Path -Path $dir)) {
                     try { New-Item -ItemType Directory -Path $dir -Force | Out-Null } catch {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not create capture folder '$dir': $_" -ForegroundColor Red
-                        Show-RelayResultOverlay -Text "CAPTURE FOLDER ERROR - STOPPED" -Color ([System.Drawing.Color]::Red)
-                        Stop-PipelineCapture
+                        $reason = "Could not create capture folder '$dir': $_"
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                        Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
                         return
                     }
                 }
@@ -2705,9 +2771,9 @@ function Invoke-PipelineScreen3Tick {
         'SrcCapture_Save' {
             $text = [string]$global:CR_PipelineSourceCaptureText
             if ([string]::IsNullOrWhiteSpace($text)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source capture returned empty text. Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE CAPTURE EMPTY - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = 'Source capture returned empty text.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason
                 return
             }
 
@@ -2728,9 +2794,9 @@ function Invoke-PipelineScreen3Tick {
             }
 
             if ($global:CR_PipelineSourceCapturePages -ge 10000) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File reached the 10000-page safety limit. Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE CAPTURE PAGE LIMIT - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = 'Auto Capture Current File reached the 10000-page safety limit.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
                 return
             }
 
@@ -2741,9 +2807,9 @@ function Invoke-PipelineScreen3Tick {
                     Add-Content -Path $global:CR_PipelineSourceLogFileCbl -Value $filtered
                 }
             } catch {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Failed to save Auto Capture Current File output: $_. Stopping before F3." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "SOURCE CAPTURE SAVE FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+                $reason = "Failed to save Auto Capture Current File output: $_"
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
                 return
             }
 
@@ -2756,8 +2822,8 @@ function Invoke-PipelineScreen3Tick {
 
         'SrcCapture_Action' {
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone during source capture. Stopping." -ForegroundColor Red
-                Stop-PipelineCapture
+                $reason = 'Target window was unavailable during source capture.'
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText ([string]$global:CR_PipelineSourceCaptureText)
                 return
             }
             Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Auto Capture Current File - sending $ActionKeyDisplay" ([System.Drawing.Color]::Orange)
@@ -2770,8 +2836,8 @@ function Invoke-PipelineScreen3Tick {
             $global:CR_ElapsedMs += $TimerTickMs
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.SourceCode.AfterActionKeyMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone during source capture. Stopping." -ForegroundColor Red
-                    Stop-PipelineCapture
+                    $reason = 'Target window was unavailable while paging source capture.'
+                    Skip-PipelineRowAfterFailure -Reason $reason -ObservedText ([string]$global:CR_PipelineSourceCaptureText)
                     return
                 }
                 try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
@@ -2796,9 +2862,9 @@ function Invoke-PipelineScreen3Tick {
                 if ([string]::IsNullOrWhiteSpace($text)) {
                     $global:CR_PipelineSourceCaptureRetries++
                     if ($global:CR_PipelineSourceCaptureRetries -gt [int]$pipeline.Screen1Select.MaxRowRetries) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not read source text after $($global:CR_PipelineSourceCaptureRetries) attempts. Stopping before F3." -ForegroundColor Red
-                        Show-RelayResultOverlay -Text "SOURCE CAPTURE READ FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                        Stop-PipelineCapture
+                        $reason = "Could not read source text after $($global:CR_PipelineSourceCaptureRetries) attempts."
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                        Skip-PipelineRowAfterFailure -Reason $reason
                         return
                     }
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source clipboard was empty; retrying Ctrl+C ($($global:CR_PipelineSourceCaptureRetries))." -ForegroundColor Yellow
@@ -2807,11 +2873,11 @@ function Invoke-PipelineScreen3Tick {
                     return
                 }
 
-                $sourceScreen = Get-PipelineScreenNumber -Text $text
+                $sourceScreen = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
                 if ($sourceScreen -ne 3) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File left the verified SOURCE CODE page (detected screen $sourceScreen). Stopping before F3." -ForegroundColor Red
-                    Show-RelayResultOverlay -Text "SOURCE PAGE CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                    Stop-PipelineCapture
+                    $reason = "Auto Capture Current File left SOURCE CODE (detected screen $sourceScreen)."
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                    Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
                     return
                 }
 
@@ -2823,9 +2889,9 @@ function Invoke-PipelineScreen3Tick {
         }
 
         default {
-            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unexpected source-code state '$($global:CR_PipelineState)' - stopping to be safe." -ForegroundColor Red
-            Show-RelayResultOverlay -Text "UNEXPECTED SOURCE STATE - STOPPED" -Color ([System.Drawing.Color]::Red)
-            Stop-PipelineCapture
+            $reason = "Unexpected source-code state '$($global:CR_PipelineState)'."
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and trying to return to REPOSITORY LIST." -ForegroundColor Yellow
+            Skip-PipelineRowAfterFailure -Reason $reason -ObservedText ([string]$global:CR_PipelineSourceCaptureText)
         }
     }
 }
@@ -4521,6 +4587,8 @@ function Stop-PipelineCapture {
     $global:CR_PipelineEnvironmentIdx = 0
     $global:CR_PipelineSqlIterations = 0
     $global:CR_PipelineAfterBack     = $null
+    $global:CR_PipelineBackRetryCount = 0
+    $global:CR_PipelineFailureRowLogged = $false
     $global:CR_PipelineComponentLabel   = $null
     $global:CR_PipelineEnvironmentLabel = $null
     $global:CR_PipelineCurrentScreen    = 0
@@ -4717,6 +4785,8 @@ $global:CR_PipelineComponentIdx     = 0
 $global:CR_PipelineEnvironmentIdx   = 0
 $global:CR_PipelineSqlIterations    = 0
 $global:CR_PipelineAfterBack        = $null   # state to resume at once the single F3 "back" completes
+$global:CR_PipelineBackRetryCount  = 0
+$global:CR_PipelineFailureRowLogged = $false
 $global:CR_PipelineComponentLabel   = $null
 $global:CR_PipelineEnvironmentLabel = $null
 $global:CR_PipelineCurrentScreen    = 0   # 0 = unknown, else 1/2/3 - see Get-PipelineScreenNumber
@@ -4844,6 +4914,20 @@ $tickAction = {
                         $expected = if ($global:CR_PipelineAfterBack -eq 'CompNext_Action') { 1 } else { 2 }
 
                         if ($detected -ne $expected) {
+                            if ($expected -eq 1 -and $detected -eq 2 -and [int]$global:CR_PipelineBackRetryCount -lt 1) {
+                                $global:CR_PipelineBackRetryCount++
+                                Write-Host "[AutoClipCapture] [$($pipeline.Name)] F3 returned to COMPONENT VERSION instead of REPOSITORY LIST; trying one more F3 before skipping the failed row." -ForegroundColor Yellow
+                                $global:CR_PipelineState = 'Back_Action'
+                                $global:CR_ElapsedMs = 0
+                                return
+                            }
+                            if ($expected -eq 1 -and [int]$global:CR_PipelineBackRetryCount -lt 2) {
+                                $reason = "F3 landed on screen $detected instead of REPOSITORY LIST; trying one final return before advancing."
+                                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason" -ForegroundColor Yellow
+                                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
+                                $global:CR_PipelineBackRetryCount = 2
+                                return
+                            }
                             Write-Host "[AutoClipCapture] [$($pipeline.Name)] Landed on screen $detected after going back, expected screen $expected - stopping to be safe." -ForegroundColor Red
                             Show-RelayResultOverlay -Text "UNEXPECTED SCREEN - STOPPED" -Color ([System.Drawing.Color]::Red)
                             Stop-PipelineCapture
@@ -4852,18 +4936,19 @@ $tickAction = {
 
                         $global:CR_PipelineState     = $global:CR_PipelineAfterBack
                         $global:CR_PipelineAfterBack = $null
+                        $global:CR_PipelineBackRetryCount = 0
                         $global:CR_ElapsedMs         = 0
                     }
                 }
             }
         } catch {
             Write-Host "[AutoClipCapture] [$($global:CR_ActivePipelineConfig.Name)] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
-            if ([string]$global:CR_PipelineState -like 'Src*') {
-                # A source-capture error must never fall through to
-                # repository row selection while the terminal is still
-                # on the source screen.
-                Show-RelayResultOverlay -Text "SOURCE CAPTURE ERROR - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
+            $failedState = [string]$global:CR_PipelineState
+            if ($failedState -like 'Src*' -or $failedState -like 'Env*' -or $failedState -like 'CompZoom*' -or $failedState -like 'CompReject*' -or $failedState -like 'Back_*') {
+                # Log row-level errors and recover to the repository list
+                # before moving on to another COB row.
+                $observedFailureText = if ($failedState -like 'Src*') { [string]$global:CR_PipelineSourceCaptureText } elseif ($failedState -like 'Env*') { [string]$global:CR_PipelineScreen2CapturedText } else { [string]$global:CR_PipelineScreen1PrevPageText }
+                Skip-PipelineRowAfterFailure -Reason "Pipeline tick failed in state '$failedState': $($_.Exception.Message)" -ObservedText $observedFailureText
             } else {
                 # Re-scan rather than resume CompZoom_Action directly -
                 # the error could have hit mid-scan, leaving the row list
@@ -5350,6 +5435,8 @@ $hotkeyAction = {
             $global:CR_PipelineEnvironmentIdx   = 0
             $global:CR_PipelineSqlIterations    = 0
             $global:CR_PipelineAfterBack        = $null
+            $global:CR_PipelineBackRetryCount  = 0
+            $global:CR_PipelineFailureRowLogged = $false
             $global:CR_PipelineComponentLabel   = $null
             $global:CR_PipelineEnvironmentLabel = $null
             $global:CR_PipelineCurrentScreen    = 0
