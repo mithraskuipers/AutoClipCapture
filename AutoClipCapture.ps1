@@ -90,7 +90,7 @@
                             every component checked so far.
                        Pressing the same mode's hotkey again while it
                        is running cancels it. Only one mode (or the
-                       Toggle relay) can run at a time. Modes
+                       Auto capture current file) can run at a time. Modes
                        themselves are no longer edited from the config
                        GUI - only their hotkeys are. A hotkey flagged
                        "right-side only" only fires when the physical
@@ -271,7 +271,7 @@ function Show-ConfigEditorGui {
  GUI for editing AutoClipCaptureConfig.json - the settings file used
  by AutoClipCapture.ps1. Organized into tabs:
 
-   General           - default log location, the Toggle relay's
+   General           - default log location, Auto capture current file's
                         action key
    Timing & Rows      - copy/action delays, internal poll interval,
                         rows to skip at the start/end of each capture,
@@ -279,7 +279,7 @@ function Show-ConfigEditorGui {
    Duplicates         - duplicate-capture detection (pause & ask when
                         back-to-back captures come back almost
                         identical)
-   Hotkeys            - the Toggle hotkey (start/stop the classic
+   Hotkeys            - the Toggle hotkey (start/stop Auto capture current file, the classic
                         capture-and-log relay), the Exit hotkey, the
                         SQL Search hotkey, and the F3 (single press)
                         hotkey
@@ -299,7 +299,7 @@ function Show-ConfigEditorGui {
  to Alt+> and Alt+< and don't require this, since either side's
  Alt/Shift key works fine for those.
 
- The Toggle relay's ACTION KEY is different: it's just simulated as a
+ Auto capture current file's ACTION KEY is different: it's just simulated as a
  keypress inside the target application, so it can be a single key
  with no modifier at all (e.g. plain F8), or a modified combo if the
  target app needs one (e.g. Ctrl+F8).
@@ -570,7 +570,7 @@ $tabs.Controls.AddRange(@($tabGeneral, $tabTiming, $tabDup, $tabKeys))
 
 # ===================== General tab =====================
 $grpLog = New-Object System.Windows.Forms.GroupBox
-$grpLog.Text = "Default log location (you'll be asked for a filename each time you start the Toggle relay)"
+$grpLog.Text = "Default log location (asked for a filename each time you start Auto capture current file)"
 $grpLog.Location = New-Object System.Drawing.Point(10, 10)
 $grpLog.Size = New-Object System.Drawing.Size(415, 60)
 
@@ -595,7 +595,7 @@ $btnBrowse.Add_Click({
 $grpLog.Controls.AddRange(@($txtLogFile, $btnBrowse))
 
 $grpAction = New-Object System.Windows.Forms.GroupBox
-$grpAction.Text = "Toggle relay's action key (pressed after each Ctrl+C)"
+$grpAction.Text = "Auto capture current file: action key (pressed after each Ctrl+C)"
 $grpAction.Location = New-Object System.Drawing.Point(10, 80)
 $grpAction.Size = New-Object System.Drawing.Size(415, 95)
 
@@ -637,7 +637,7 @@ $numAfterActionDelay.Value = [int]$existing.AfterActionKeyDelayMs
 $grpAction.Controls.AddRange(@($lblAction, $txtAction, $btnSetAction, $lblActionDelay, $numAfterActionDelay))
 
 $lblGeneralHint = New-Object System.Windows.Forms.Label
-$lblGeneralHint.Text = "This action key is only used by the Toggle relay. Each Mode (see the Modes tab) has its own separate action key."
+$lblGeneralHint.Text = "This action key is only used by Auto capture current file. Each Mode (see the Modes tab) has its own separate action key."
 $lblGeneralHint.Location = New-Object System.Drawing.Point(10, 182)
 $lblGeneralHint.Size = New-Object System.Drawing.Size(415, 30)
 $lblGeneralHint.ForeColor = 'Gray'
@@ -680,7 +680,7 @@ $numTimerTick.Value = [int]$existing.TimerTickMs
 $grpTiming.Controls.AddRange(@($lblCopy, $numCopyDelay, $lblTick, $numTimerTick))
 
 $grpRows = New-Object System.Windows.Forms.GroupBox
-$grpRows.Text = "Row filtering (skip rows in each captured chunk before saving - Toggle relay only)"
+$grpRows.Text = "Row filtering (skip rows in each captured chunk before saving - Auto capture current file only)"
 $grpRows.Location = New-Object System.Drawing.Point(10, 105)
 $grpRows.Size = New-Object System.Drawing.Size(415, 90)
 
@@ -736,7 +736,7 @@ $tabTiming.Controls.AddRange(@($grpTiming, $grpRows, $grpOverlay))
 
 # ===================== Duplicates tab =====================
 $grpDup = New-Object System.Windows.Forms.GroupBox
-$grpDup.Text = "Duplicate-capture detection (Toggle relay only)"
+$grpDup.Text = "Duplicate-capture detection (Auto capture current file only)"
 $grpDup.Location = New-Object System.Drawing.Point(10, 10)
 $grpDup.Size = New-Object System.Drawing.Size(415, 80)
 
@@ -779,9 +779,9 @@ $grpKeys.Location = New-Object System.Drawing.Point(10, 10)
 $grpKeys.Size = New-Object System.Drawing.Size(415, 200)
 
 $lblToggle = New-Object System.Windows.Forms.Label
-$lblToggle.Text = "Start / stop Toggle relay:"
+$lblToggle.Text = "Auto capture current file:"
 $lblToggle.Location = New-Object System.Drawing.Point(15, 25)
-$lblToggle.Size = New-Object System.Drawing.Size(150, 20)
+$lblToggle.Size = New-Object System.Drawing.Size(155, 20)
 
 $txtToggle = New-Object System.Windows.Forms.TextBox
 $txtToggle.Location = New-Object System.Drawing.Point(170, 22)
@@ -956,7 +956,7 @@ $btnSave.Add_Click({
     # Collect every hotkey (Toggle, Exit, SQL Search, F3) and make sure
     # none of them collide.
     $allHotkeys = New-Object System.Collections.ArrayList
-    [void]$allHotkeys.Add([pscustomobject]@{ Name = "Toggle relay"; Mods = $script:ToggleMods;    Key = $script:ToggleKey })
+    [void]$allHotkeys.Add([pscustomobject]@{ Name = "Auto capture current file"; Mods = $script:ToggleMods;    Key = $script:ToggleKey })
     [void]$allHotkeys.Add([pscustomobject]@{ Name = "Exit";         Mods = $script:ExitMods;      Key = $script:ExitKey })
     [void]$allHotkeys.Add([pscustomobject]@{ Name = "SQL Search";   Mods = $script:SqlSearchMods; Key = $script:SqlSearchKey })
     [void]$allHotkeys.Add([pscustomobject]@{ Name = "F3";           Mods = $script:F3Mods;        Key = $script:F3Key })
@@ -2500,7 +2500,7 @@ function Get-DefaultConfig {
 }
 
 # The default "scan mode" bound to Alt+>. Instead of the
-# plain Toggle relay (Ctrl+Alt+C), this repeatedly presses F5, copies
+# plain Auto capture current file (Ctrl+Alt+C), this repeatedly presses F5, copies
 # the screen, and looks for "EXEC SQL" - showing a big SQL FOUND / NO
 # SQL FOUND banner once it knows the answer. UseFocusedWindow means it
 # targets whatever window already has focus when the hotkey is
@@ -2544,7 +2544,7 @@ if (-not [System.IO.Path]::IsPathRooted($DefaultLogFile)) {
 $LogDir             = Split-Path -Path $DefaultLogFile -Parent
 $DefaultBaseName    = [System.IO.Path]::GetFileNameWithoutExtension($DefaultLogFile)
 
-# The classic Toggle relay (Ctrl+Shift+P) always saves two copies of
+# Auto capture current file (Ctrl+Shift+P) always saves two copies of
 # whatever it captures - a .txt copy in ..\txt and a .cbl copy in
 # ..\cbl - regardless of what extension (if any) the person types into
 # the filename prompt. Those are the "txt" and "cbl" folders right
@@ -2940,6 +2940,24 @@ public class StatusOverlay : Form
             const int WS_EX_TOOLWINDOW = 0x00000080;
             CreateParams cp = base.CreateParams;
             cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+}
+
+// Same non-activating overlay, but also click-through (WS_EX_TRANSPARENT +
+// WS_EX_LAYERED), so the bottom-center hotkey overview never swallows a
+// click meant for the window underneath it.
+public class MenuOverlay : StatusOverlay
+{
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_TRANSPARENT = 0x00000020;
+            const int WS_EX_LAYERED = 0x00080000;
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_LAYERED;
             return cp;
         }
     }
@@ -3868,7 +3886,7 @@ function Stop-RelayCapture {
 }
 
 # Mirrors Stop-RelayCapture, but for a running scan Mode instead of the
-# classic Toggle relay. Called both when a mode reaches a stop condition
+# Auto capture current file. Called both when a mode reaches a stop condition
 # (found / not-found / safety limit) and when its hotkey is pressed
 # again to cancel it manually.
 function Stop-ModeCapture {
@@ -3946,20 +3964,20 @@ function Set-RelayForeground {
 }
 
 Write-Host "AutoClipCapture is running." -ForegroundColor White
-Write-Host "  $ToggleDisplay  -> start/stop the capture loop" -ForegroundColor White
+Write-Host "  $ToggleDisplay  -> Auto capture current file (start/stop the capture loop)" -ForegroundColor White
 Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $ExitDisplay  -> quit"
 Write-Host "  $F3Display  -> send a single F3 to the focused window"
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     $m = $ModeHotkeyMap[$hkId]
-    Write-Host "  $($m.Hotkey.Display)  -> mode: $($m.Name)  (action key: $($m.ActionKeyDisplay))" -ForegroundColor White
+    Write-Host "  $($m.Hotkey.Display)  -> mode: $($m.Name)  (action key: $($m.ActionKeyDisplay)) - run it on the currently opened source code" -ForegroundColor White
 }
 foreach ($hkId in $PipelineHotkeyMap.Keys) {
     $p = $PipelineHotkeyMap[$hkId]
     if ($null -ne $p.ComponentList -and [bool]$p.ComponentList.Enabled) {
-        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component list pre-pass -> component -> environment -> SQL search)" -ForegroundColor White
+        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (START ON THE REPOSITORY LIST PAGE; component list pre-pass first)" -ForegroundColor White
     } else {
-        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (component -> environment -> SQL search)" -ForegroundColor White
+        Write-Host "  $($p.Hotkey.Display)  -> pipeline: $($p.Name)  (START ON THE REPOSITORY LIST PAGE)" -ForegroundColor White
     }
 }
 foreach ($hkId in $PipelineStepHotkeyMap.Keys) {
@@ -3985,6 +4003,74 @@ if ($null -ne $anyScreen1Pipeline) {
 }
 Write-Host ""
 
+# ---- Bottom-center hotkey overview: shown once at startup and whenever
+# nothing is running, so the available functions and their keybindings
+# are always visible. Click-through (MenuOverlay), and hidden while a
+# capture, mode or pipeline is running or being set up, so it never sits
+# on top of the screen being worked on. ----
+$menuRows = New-Object System.Collections.ArrayList
+foreach ($hkId in ($ModeHotkeyMap.Keys | Sort-Object)) {
+    $m = $ModeHotkeyMap[$hkId]
+    $menuModeText = if ([string]$m.Id -eq 'sql-search') { 'SQL search mode in current opened source code' } else { "$($m.Name) mode" }
+    [void]$menuRows.Add(@([string]$m.Hotkey.Display, $menuModeText))
+}
+[void]$menuRows.Add(@([string]$ToggleDisplay, 'Auto capture current file'))
+foreach ($hkId in ($PipelineHotkeyMap.Keys | Sort-Object)) {
+    $p = $PipelineHotkeyMap[$hkId]
+    [void]$menuRows.Add(@([string]$p.Hotkey.Display, "$($p.Name) pipeline (start on the REPOSITORY LIST page)"))
+}
+foreach ($hkId in ($PipelineStepHotkeyMap.Keys | Sort-Object)) {
+    $p = $PipelineStepHotkeyMap[$hkId]
+    [void]$menuRows.Add(@([string]$p.StepHotkey.Display, "$($p.Name) pipeline, step by step ($StepConfirmDisplay confirms each input)"))
+}
+[void]$menuRows.Add(@([string]$ExitDisplay, 'Quit'))
+
+$menuKeyWidth = ($menuRows | ForEach-Object { $_[0].Length } | Measure-Object -Maximum).Maximum
+$menuLines = @('AutoClipCapture is ready. Press a hotkey:')
+foreach ($r in $menuRows) { $menuLines += ('  ' + $r[0].PadRight($menuKeyWidth) + '   ' + $r[1]) }
+$menuText = $menuLines -join "`r`n"
+
+$menuFont = New-Object System.Drawing.Font('Consolas', 11, [System.Drawing.FontStyle]::Bold)
+$menuSize = [System.Windows.Forms.TextRenderer]::MeasureText($menuText, $menuFont)
+
+$menuOverlay = New-Object MenuOverlay
+$menuOverlay.FormBorderStyle = 'None'
+$menuOverlay.StartPosition   = 'Manual'
+$menuOverlay.ShowInTaskbar   = $false
+$menuOverlay.TopMost         = $true
+$menuOverlay.BackColor       = [System.Drawing.Color]::Black
+$menuOverlay.Opacity         = 0.88
+$menuOverlay.Size            = New-Object System.Drawing.Size(($menuSize.Width + 40), ($menuSize.Height + 28))
+
+$menuLabel = New-Object System.Windows.Forms.Label
+$menuLabel.Dock      = 'Fill'
+$menuLabel.AutoSize  = $false
+$menuLabel.TextAlign = 'MiddleLeft'
+$menuLabel.Padding   = New-Object System.Windows.Forms.Padding(14, 8, 14, 8)
+$menuLabel.ForeColor = [System.Drawing.Color]::White
+$menuLabel.Font      = $menuFont
+$menuLabel.Text      = $menuText
+$menuOverlay.Controls.Add($menuLabel)
+
+[void]$menuOverlay.Handle
+$menuOverlay.Hide()
+
+$menuSyncTimer = New-Object System.Windows.Forms.Timer
+$menuSyncTimer.Interval = 300
+$menuSyncTimer.Add_Tick({
+    $shouldShow = ($null -eq $global:CR_ActiveAutomation) -and (-not $global:CR_Selecting)
+    if ($shouldShow -and -not $menuOverlay.Visible) {
+        $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $x = $area.Left + [int](($area.Width - $menuOverlay.Width) / 2)
+        $y = $area.Bottom - $menuOverlay.Height - 30
+        $menuOverlay.Location = New-Object System.Drawing.Point($x, $y)
+        $menuOverlay.Show()
+    } elseif (-not $shouldShow -and $menuOverlay.Visible) {
+        $menuOverlay.Hide()
+    }
+})
+$menuSyncTimer.Start()
+
 $global:CR_Running      = $false
 $global:CR_Selecting    = $false
 $global:CR_State        = 'Idle'   # Idle -> PostCopy -> PostAction -> Idle ...
@@ -3996,7 +4082,7 @@ $global:CR_TargetTitle  = ''
 $global:CR_PrevCaptureText     = $null
 $global:CR_SuppressDupWarning  = $false
 
-# $null = nothing running, 'Relay' = the classic Toggle capture loop,
+# $null = nothing running, 'Relay' = the Auto capture current file loop,
 # or a Mode's Id = that scan Mode is running. Only one of these can be
 # active at a time - it's what the Toggle/Mode hotkey handlers check
 # before allowing a new session to start.
@@ -4356,7 +4442,7 @@ $hotkeyAction = {
         }
         if ($null -ne $global:CR_ActiveAutomation) {
             $busyName = if ($global:CR_ActiveModeConfig) { $global:CR_ActiveModeConfig.Name } else { $global:CR_ActiveAutomation }
-            Write-Host "[AutoClipCapture] Can't start the Toggle relay - '$busyName' is currently running." -ForegroundColor Yellow
+            Write-Host "[AutoClipCapture] Can't start Auto capture current file - '$busyName' is currently running." -ForegroundColor Yellow
             return
         }
 
@@ -4668,6 +4754,8 @@ foreach ($hkId in $ModeHotkeyMap.Keys) {
 foreach ($hkId in $PipelineHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
 }
+$menuSyncTimer.Stop()
+$menuOverlay.Dispose()
 $statusForm.Dispose()
 $resultOverlay.Dispose()
 Write-Host "AutoClipCapture stopped."
