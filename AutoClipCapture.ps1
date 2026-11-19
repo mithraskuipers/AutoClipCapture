@@ -2112,6 +2112,25 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_ElapsedMs = 0
                 return
             }
+
+            # A prior interrupted/failed run can leave B in this row's
+            # selection field. Reuse a single B rather than appending one;
+            # remove extra B characters before Enter when needed.
+            $existingBCount = 0
+            $cobMatch = [regex]::Match([string]$row.LineText, '\bCOB\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($cobMatch.Success) {
+                $selectionPrefix = ([string]$row.LineText).Substring(0, $cobMatch.Index)
+                $existingBCount = [regex]::Matches($selectionPrefix, 'B', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count
+            }
+            $global:CR_PipelineExistingBCount = $existingBCount
+            $global:CR_PipelineBDeleteRemaining = [Math]::Max(0, $existingBCount - 1)
+            $global:CR_PipelineBSelectionSent = ($existingBCount -gt 0)
+            if ($existingBCount -eq 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1) already has one B in its selection field; will press Enter without typing another B." -ForegroundColor DarkCyan
+            } elseif ($existingBCount -gt 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1) already has $existingBCount B characters; will delete $($existingBCount - 1) extra character(s) before Enter." -ForegroundColor Yellow
+            }
+
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
             if ($null -eq $pt) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibrated terminal bounds no longer match the target point or window size. Recalibrate after terminal resize/font changes; stopping before click." -ForegroundColor Red
@@ -2135,7 +2154,8 @@ function Invoke-PipelineScreen1Tick {
             # Shown BEFORE anything is clicked - the red circle marker
             # lands on $screenPt so a wrong target is obvious right
             # away, without a single click having happened yet.
-            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to click here, type '$($s1.SelectionText)' + Enter"
+            $inputDescription = if ($existingBCount -eq 1) { 'click the existing B and press Enter' } elseif ($existingBCount -gt 1) { "click here, remove $($existingBCount - 1) extra B character(s), then press Enter" } else { "click here, type '$($s1.SelectionText)' + Enter" }
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to $inputDescription"
             if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
 
             if ([int]$PipelineTimingsMs.RepositoryList.BeforeClickMs -gt 0) {
@@ -2172,10 +2192,35 @@ function Invoke-PipelineScreen1Tick {
             # Don't send HOME/DEL here. On this Host On-Demand screen,
             # HOME can focus the Show Deleted field, and DEL would erase
             # its N value. Click first, then give each key a separate
-            # one-second stage so the terminal cannot merge/repeat input.
+            # configured-delay stage so the terminal cannot merge input.
             Invoke-Screen1RowClick -ScreenPoint $screenPt
-            $global:CR_PipelineState = 'CompZoom_Type'
+            if ($global:CR_PipelineBDeleteRemaining -gt 0) {
+                $global:CR_PipelineState = 'CompZoom_DuplicateBWait'
+            } elseif ($global:CR_PipelineExistingBCount -gt 0) {
+                $global:CR_PipelineState = 'CompZoom_Enter'
+            } else {
+                $global:CR_PipelineState = 'CompZoom_Type'
+            }
             $global:CR_ElapsedMs     = 0
+        }
+
+        'CompZoom_DuplicateBWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable while removing an extra B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('{DELETE}')
+                $global:CR_PipelineBDeleteRemaining--
+                if ($global:CR_PipelineBDeleteRemaining -gt 0) {
+                    $global:CR_PipelineState = 'CompZoom_DuplicateBWait'
+                } else {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Removed extra B character(s); retaining one B for the COB row." -ForegroundColor DarkCyan
+                    $global:CR_PipelineState = 'CompZoom_Enter'
+                }
+                $global:CR_ElapsedMs = 0
+            }
         }
 
         'CompZoom_Type' {
@@ -2185,7 +2230,14 @@ function Invoke-PipelineScreen1Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before typing B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
                     return
                 }
-                [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
+                if (-not $global:CR_PipelineBSelectionSent) {
+                    # Set the guard before dispatch. If a tick is re-entered
+                    # while SendWait pumps messages, it cannot type B twice.
+                    $global:CR_PipelineBSelectionSent = $true
+                    [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
+                } else {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] B is already present for this row; skipping duplicate input." -ForegroundColor Yellow
+                }
                 $global:CR_PipelineState = 'CompZoom_Enter'
                 $global:CR_ElapsedMs = 0
             }
@@ -4629,6 +4681,9 @@ function Stop-PipelineCapture {
     $global:CR_PipelineState         = 'CompScan_Action'
     $global:CR_ElapsedMs             = 0
     $global:CR_PipelineComponentIdx  = 0
+    $global:CR_PipelineExistingBCount = 0
+    $global:CR_PipelineBDeleteRemaining = 0
+    $global:CR_PipelineBSelectionSent = $false
     $global:CR_PipelineEnvironmentIdx = 0
     $global:CR_PipelineSqlIterations = 0
     $global:CR_PipelineAfterBack     = $null
@@ -4827,6 +4882,9 @@ $global:CR_ModeIterations   = 0
 $global:CR_ActivePipelineConfig     = $null
 $global:CR_PipelineState            = 'CompScan_Action'
 $global:CR_PipelineComponentIdx     = 0
+$global:CR_PipelineExistingBCount   = 0
+$global:CR_PipelineBDeleteRemaining = 0
+$global:CR_PipelineBSelectionSent   = $false
 $global:CR_PipelineEnvironmentIdx   = 0
 $global:CR_PipelineSqlIterations    = 0
 $global:CR_PipelineAfterBack        = $null   # state to resume at once the single F3 "back" completes
@@ -5477,6 +5535,9 @@ $hotkeyAction = {
             $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompScan_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
+            $global:CR_PipelineExistingBCount   = 0
+            $global:CR_PipelineBDeleteRemaining = 0
+            $global:CR_PipelineBSelectionSent   = $false
             $global:CR_PipelineEnvironmentIdx   = 0
             $global:CR_PipelineSqlIterations    = 0
             $global:CR_PipelineAfterBack        = $null

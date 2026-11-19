@@ -1,7 +1,7 @@
 ﻿{
     "LogFile":  "CapturedOutput.txt",
-    "CopyDelayMs":  500,
-    "AfterActionKeyDelayMs":  500,
+    "CopyDelayMs":  300,
+    "AfterActionKeyDelayMs":  300,
     "TimerTickMs":  50,
     "SkipRowsStart":  3,
     "SkipRowsEnd":  3,
@@ -137,32 +137,32 @@
                   ],
     "PipelineTimingsMs":  {
         "RepositoryList":  {
-            "BeforeClickMs":  500,
-            "AfterClickMs":  500,
-            "AfterSelectionLetterMs":  500,
-            "AfterEnterMs":  500,
-            "AfterClipboardCopyMs":  500,
-            "InitialScanAfterClipboardCopyMs":  500,
-            "AfterPageKeyMs":  500,
-            "AfterDeleteMs":  500,
-            "AfterF3Ms":  500
+            "BeforeClickMs":  300,
+            "AfterClickMs":  300,
+            "AfterSelectionLetterMs":  300,
+            "AfterEnterMs":  300,
+            "AfterClipboardCopyMs":  300,
+            "InitialScanAfterClipboardCopyMs":  300,
+            "AfterPageKeyMs":  300,
+            "AfterDeleteMs":  300,
+            "AfterF3Ms":  300
         },
         "ComponentVersion":  {
-            "BeforeClickMs":  500,
-            "AfterClickMs":  500,
-            "PauseAfterSBeforeEnterMs":  500,
-            "AfterEnterMs":  500,
-            "AfterClipboardCopyMs":  500,
-            "AfterF3Ms":  500
+            "BeforeClickMs":  300,
+            "AfterClickMs":  300,
+            "PauseAfterSBeforeEnterMs":  300,
+            "AfterEnterMs":  300,
+            "AfterClipboardCopyMs":  300,
+            "AfterF3Ms":  300
         },
         "SourceCode":  {
-            "AfterActionKeyMs":  500,
-            "AfterClipboardCopyMs":  500,
-            "AfterF3Ms":  500
+            "AfterActionKeyMs":  300,
+            "AfterClipboardCopyMs":  300,
+            "AfterF3Ms":  300
         },
         "ComponentList":  {
-            "AfterPageKeyMs":  500,
-            "AfterClipboardCopyMs":  500
+            "AfterPageKeyMs":  300,
+            "AfterClipboardCopyMs":  300
         }
     }
 }
