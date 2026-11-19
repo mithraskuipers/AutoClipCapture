@@ -299,7 +299,7 @@ function Show-ConfigEditorGui {
 
 # Source-code Auto Capture Current File pacing. Lower this value to make
 # the paging/copy loop faster; it is used after F8 and after Ctrl+C.
-$SourceCaptureWaitMs = 500
+$SourceCaptureWaitMs = 250
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
