@@ -1736,26 +1736,20 @@ public static class CR_DpiAwareness {
       Deleted: N"/column headers/filter line) is always exactly the
       same size on every page - if that ever isn't true, row math
       drifts and this whole approach stops being safe.
-   1. Every row slot is tried - there's no "is this actually a COB
-      row" check anymore. A slot with nothing real in it (past the end
-      of a partially-filled last page, or a non-COB row type) simply
-      doesn't navigate anywhere; step 4 below already treats that as
-      the normal "nothing happened, move on" case, so no separate
-      blank-detection step is needed.
+   1. Every row slot is tried. A successful selection must open
+      COMPONENT LIST; if Enter leaves the terminal on REPOSITORY LIST
+      or reaches an unrecognized screen, the same page is recaptured and
+      the pipeline stops on repeated failure instead of advancing.
    1a. Click the calibrated selection field at SelectionColumnIndex
       (ClickColumnOffset is zero) using the pixel math calibrated by
       CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 into
       Pipelines[].Screen1Select (OriginX/OriginY/CharWidthPx/
       CharHeightPx).
    2. Type Screen1Select.SelectionText (default "B") and press Enter.
-   3. Confirm we landed on Screen 2 (COMPONENT LIST). If we did, hand
-      off to AutoClipCaptureSqlPipelineScreen2.ps1, which
-      logs it (if enabled) and queues a single F3 "back" to Screen 1
-      (that shared "go back" mechanic lives in AutoClipCapture.ps1
-      itself - see Back_Action/Back_Wait/Back_Copy).
-   4. If nothing happened (blank slot, non-COB row, or the item is
-      unavailable) - we're still on Screen 1 - just move on to the
-      next row slot without going back.
+   3. Confirm we landed on COMPONENT LIST. Log it (if enabled), press
+      F3, and verify that REPOSITORY LIST returned.
+   4. Only after that verified return, move down exactly one row and
+      repeat from step 1.
    5. Once every row slot on the current page (RowsPerPage of them)
       has been tried, press Screen1Select.PageNextToken (F8 by
       default) to bring the next page into view, and keep going with
@@ -1782,10 +1776,9 @@ public static class CR_DpiAwareness {
    CompZoom_Copy    - Ctrl+C, read the clipboard, work out what
                       happened, branch accordingly (see below).
    CompNext_Action  - decide the next row (same page) or trigger a
-                      page turn. Reached either right after a
-                      non-navigating row (still on Screen 1) or once
-                      Screen 2 has been dealt with and Back_Copy has
-                      confirmed we're back on Screen 1. This exact
+                      page turn. Reached only after Back_Copy has
+                      confirmed F3 returned from COMPONENT LIST to
+                      REPOSITORY LIST. This exact
                       name also doubles as the "AfterBack" marker the
                       shared Back_Copy logic checks to know it should
                       expect Screen 1 (not Screen 2) once the F3
@@ -2100,8 +2093,8 @@ function Invoke-PipelineScreen1Tick {
                 $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
 
                 if ($detected -eq 2) {
-                    # Landed on Screen 2 (COMPONENT LIST; older sessions
-                    # may label it COMPONENT VERSION - SELECT). Hand off to
+                    # Landed on the COMPONENT LIST page, recognized by
+                    # COMPONENT VERSION on clipboard row 0. Hand off to
                     # Screen2.ps1 to log it and queue the
                     # single F3 back to Screen 1.
                     $global:CR_PipelineScreen1RetryCount   = 0
@@ -2123,40 +2116,49 @@ function Invoke-PipelineScreen1Tick {
                         $global:CR_PipelineScreen1RetryCount++
                         $maxRetries = [int]$s1.MaxRowRetries
                         if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) on page $($global:CR_PipelineScreen1PageIdx + 1) was rejected ('$($s1.InvalidCommandText)') $maxRetries time(s) in a row - skipping it. The Command line likely needs clearing by hand once, then restart the pipeline." -ForegroundColor Red
-                            $global:CR_PipelineScreen1RetryCount = 0
-                            $global:CR_PipelineState = 'CompNext_Action'
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) on page $($global:CR_PipelineScreen1PageIdx + 1) was rejected ('$($s1.InvalidCommandText)') $maxRetries time(s) in a row. Stopping without advancing; clear the Command line and restart." -ForegroundColor Red
+                            Show-RelayResultOverlay -Text "ROW REJECTED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                            Stop-PipelineCapture
+                            return
                         } else {
                             Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) rejected by REPOLIST (stray Command-line text) - retrying ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
                             $global:CR_PipelineState = 'CompZoom_Action'
                         }
                         $global:CR_ElapsedMs = 0
                     } else {
-                        # Genuinely still on Screen 1 with no rejection
-                        # banner - this row's selection field didn't
-                        # lead anywhere (blank row, or the item is
-                        # unavailable). Nothing to go "back" from - just
-                        # move on to the next row.
-                        $global:CR_PipelineScreen1RetryCount = 0
-                        $global:CR_PipelineState = 'CompNext_Action'
+                        # Enter should have opened COMPONENT LIST. Keep
+                        # checking this same page briefly for a delayed
+                        # transition; never advance to another row unless
+                        # we observed COMPONENT LIST and then F3 returned
+                        # us to REPOSITORY LIST.
+                        $global:CR_PipelineScreen1RetryCount++
+                        $maxRetries = [int]$s1.MaxRowRetries
+                        if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter for row $($global:CR_PipelineComponentIdx + 1). COMPONENT LIST did not appear; stopping without advancing." -ForegroundColor Red
+                            Show-RelayResultOverlay -Text "COMPONENT LIST NOT OPENED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                            Stop-PipelineCapture
+                            return
+                        }
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter; checking again before advancing ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
+                        $global:CR_PipelineState = 'CompZoom_Wait'
                         $global:CR_ElapsedMs     = 0
                     }
                 }
                 else {
-                    # Unrecognized screen (e.g. the terminal hadn't
-                    # finished redrawing yet). Retry the same row a few
-                    # times before giving up on it, rather than either
-                    # spinning forever or aborting the whole pipeline
-                    # over one slow screen.
+                    # Do not click again while the terminal is on a page
+                    # we cannot identify. Recapture after a delay; a row
+                    # advances only through COMPONENT LIST -> F3 -> verified
+                    # REPOSITORY LIST.
                     $global:CR_PipelineScreen1RetryCount++
                     $maxRetries = [int]$s1.MaxRowRetries
                     if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) on page $($global:CR_PipelineScreen1PageIdx + 1) gave an unrecognized screen $maxRetries time(s) in a row - skipping it." -ForegroundColor Yellow
-                        $global:CR_PipelineScreen1RetryCount = 0
-                        $global:CR_PipelineState = 'CompNext_Action'
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) opened an unrecognized page after Enter. Stopping without clicking or advancing." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "UNRECOGNIZED COMPONENT PAGE - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
                     } else {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unrecognized screen after selecting row $($global:CR_PipelineComponentIdx + 1) - retrying ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
-                        $global:CR_PipelineState = 'CompZoom_Action'
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unrecognized page after Enter; recapturing without clicking again ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
+                        $global:CR_PipelineState = 'CompZoom_Wait'
                     }
                     $global:CR_ElapsedMs = 0
                 }
@@ -3608,8 +3610,8 @@ function Get-PipelineItemLabel {
 # Each of the 3 pipeline screens has its own fingerprint in the
 # captured text, independent of which state the pipeline *thinks*
 # it's in:
-#   Screen 1 (overview)    -> "REPOSITORY LIST" near the top
-#   Screen 2 (component list) -> "COMPONENT LIST" or legacy "COMPONENT VERSION"
+#   Screen 1 (repository list) -> "REPOSITORY LIST" on clipboard row 0
+#   Screen 2 (component list)  -> "COMPONENT VERSION" on clipboard row 0
 #   Screen 3 (COBOL code)  -> neither of the above, but has both
 #                             "BROWSE" and "Menu" on the first page
 # Returns 1, 2, 3, or 0 for text that matches none of them - a popup,
@@ -3617,9 +3619,12 @@ function Get-PipelineItemLabel {
 function Get-PipelineScreenNumber {
     param([string]$Text)
 
-    if (Test-RelayTextContains -Text $Text -Needle 'REPOSITORY LIST')   { return 1 }
-    if ((Test-RelayTextContains -Text $Text -Needle 'COMPONENT LIST') -or
-        (Test-RelayTextContains -Text $Text -Needle 'COMPONENT VERSION')) { return 2 }
+    $firstLine = ''
+    if (-not [string]::IsNullOrEmpty($Text)) {
+        $firstLine = ($Text -split "`r`n|`r|`n", 2)[0]
+    }
+    if (Test-RelayTextContains -Text $firstLine -Needle 'REPOSITORY LIST') { return 1 }
+    if (Test-RelayTextContains -Text $firstLine -Needle 'COMPONENT VERSION') { return 2 }
     if ((Test-RelayTextContains -Text $Text -Needle 'BROWSE') -and (Test-RelayTextContains -Text $Text -Needle 'Menu')) {
         return 3
     }
@@ -4254,8 +4259,11 @@ $tickAction = {
                 # ---- Single F3 press back to the previous screen, then
                 # verify we actually landed where expected before
                 # resuming wherever the caller queued up via AfterBack.
-                # Always exactly one F3 press - never held/repeated -
-                # but that alone doesn't guarantee some screens won't
+                # Always exactly one F3 press - never held/repeated.
+                # The Screen1 component loop returns automatically after
+                # a verified COMPONENT LIST result; other back actions
+                # retain the configured step-confirm gate. F3 alone does
+                # not guarantee some screens won't
                 # still jump back further than intended (e.g. all the
                 # way out to a logout screen), so Back_Copy checks the
                 # landing screen against what AfterBack implies before
@@ -4265,7 +4273,7 @@ $tickAction = {
                 # risk compounding it by pressing on regardless. ----
                 'Back_Action' {
                     $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] About to press $F3Display to go back"
-                    if (Request-PipelineStepConfirm -Description $desc) { return }
+                    if ($global:CR_PipelineAfterBack -ne 'CompNext_Action' -and (Request-PipelineStepConfirm -Description $desc)) { return }
 
                     if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
