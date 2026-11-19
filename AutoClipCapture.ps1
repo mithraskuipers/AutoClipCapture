@@ -1748,8 +1748,8 @@ public static class CR_DpiAwareness {
       Pipelines[].Screen1Select (OriginX/OriginY/CharWidthPx/
       CharHeightPx).
    2. Type Screen1Select.SelectionText (default "B") and press Enter.
-   3. Confirm we landed on Screen 2 (COMPONENT VERSION - SELECT). If we
-      did, hand off to AutoClipCaptureSqlPipelineScreen2.ps1, which
+   3. Confirm we landed on Screen 2 (COMPONENT LIST). If we did, hand
+      off to AutoClipCaptureSqlPipelineScreen2.ps1, which
       logs it (if enabled) and queues a single F3 "back" to Screen 1
       (that shared "go back" mechanic lives in AutoClipCapture.ps1
       itself - see Back_Action/Back_Wait/Back_Copy).
@@ -2100,8 +2100,9 @@ function Invoke-PipelineScreen1Tick {
                 $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
 
                 if ($detected -eq 2) {
-                    # Landed on Screen 2 (COMPONENT VERSION - SELECT).
-                    # Hand off to Screen2.ps1 to log it and queue the
+                    # Landed on Screen 2 (COMPONENT LIST; older sessions
+                    # may label it COMPONENT VERSION - SELECT). Hand off to
+                    # Screen2.ps1 to log it and queue the
                     # single F3 back to Screen 1.
                     $global:CR_PipelineScreen1RetryCount   = 0
                     $global:CR_PipelineScreen2CapturedText = $text
@@ -2273,7 +2274,7 @@ function Invoke-PipelineScreen1Tick {
 =====================================================================
  AutoClipCaptureSqlPipelineScreen2.ps1
 
- Screen 2 = COMPONENT VERSION - SELECT, the screen that appears after
+ Screen 2 = COMPONENT LIST, the screen that appears after
  typing a selection letter (e.g. "B") into a Screen 1 row and pressing
  Enter. For the current, simplified cobol-pipeline flow this screen is
  only ever looked at, not drilled into any further (no environment
@@ -3608,7 +3609,7 @@ function Get-PipelineItemLabel {
 # captured text, independent of which state the pipeline *thinks*
 # it's in:
 #   Screen 1 (overview)    -> "REPOSITORY LIST" near the top
-#   Screen 2 (environment) -> "COMPONENT VERSION" near the top
+#   Screen 2 (component list) -> "COMPONENT LIST" or legacy "COMPONENT VERSION"
 #   Screen 3 (COBOL code)  -> neither of the above, but has both
 #                             "BROWSE" and "Menu" on the first page
 # Returns 1, 2, 3, or 0 for text that matches none of them - a popup,
@@ -3617,7 +3618,8 @@ function Get-PipelineScreenNumber {
     param([string]$Text)
 
     if (Test-RelayTextContains -Text $Text -Needle 'REPOSITORY LIST')   { return 1 }
-    if (Test-RelayTextContains -Text $Text -Needle 'COMPONENT VERSION') { return 2 }
+    if ((Test-RelayTextContains -Text $Text -Needle 'COMPONENT LIST') -or
+        (Test-RelayTextContains -Text $Text -Needle 'COMPONENT VERSION')) { return 2 }
     if ((Test-RelayTextContains -Text $Text -Needle 'BROWSE') -and (Test-RelayTextContains -Text $Text -Needle 'Menu')) {
         return 3
     }
