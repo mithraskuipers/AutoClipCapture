@@ -236,9 +236,8 @@ param(
 
     # Launch the Screen1 auto-calibration tool (same tool that used to be
     # CalibrateScreen1Auto.ps1) instead of starting the capture relay. This
-    # is also how AutoClipCapture.ps1 relaunches itself, as a fresh separate
-    # process, when it offers to calibrate an unconfigured pipeline at
-    # startup or via Show-Screen1CalibrationPrompt.
+    # can also run calibration directly when an unconfigured pipeline is
+    # detected at startup or via Show-Screen1CalibrationPrompt.
     [switch]$Calibrate
 )
 
@@ -1103,18 +1102,15 @@ $form.Add_KeyDown({
 
 #=====================================================================
 # region: CalibrateScreen1Auto.ps1 - formerly its own file, now the
-# Invoke-Screen1CalibrationTool function below, invoked when this script
-# is run with -Calibrate. Everything inside is unchanged from the
-# standalone version - it's just wrapped in a function now instead of
-# being a top-level script. Like the standalone version, it's meant to
-# run as its own dedicated process (see the -Calibrate dispatch above and
-# Invoke-Screen1CalibrationNow below, which is what actually launches it) -
-# it reads/writes the console directly (Read-Host, Console.ReadKey, pause)
-# and calls exit on its own error paths, which is exactly right for a
-# standalone process but would be wrong if it ran inline inside the
-# capture relay's own process.
+# Invoke-Screen1CalibrationTool function below. Calibration runs in this
+# process and uses the existing console; it must return to its caller and
+# must never launch or exit a second PowerShell process.
 #=====================================================================
 function Invoke-Screen1CalibrationTool {
+    param(
+        $Pipeline,
+        [IntPtr]$TargetHandle = [IntPtr]::Zero
+    )
 <#
 =====================================================================
  CalibrateScreen1Auto.ps1
@@ -1206,7 +1202,7 @@ public static class CR_DpiAwareness {
     Write-Host "Could not set DPI awareness - if Windows display scaling isn't 100%, calibration will be off. $_" -ForegroundColor Yellow
 }
 
-Add-Type @"
+Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -1264,7 +1260,7 @@ public static class CalibNative4
         return list;
     }
 }
-"@
+"@ -ErrorAction SilentlyContinue
 
 # A row/column counts as "terminal" if at least this fraction of its
 # pixels are dark. The terminal's black background dominates even rows
@@ -1401,8 +1397,7 @@ Write-Host ""
 $configPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 if (-not (Test-Path $configPath)) {
     Write-Host "Could not find AutoClipCaptureConfig.json next to this script." -ForegroundColor Red
-    pause
-    exit 1
+    return $false
 }
 $config = Get-Content -Raw -Path $configPath | ConvertFrom-Json
 
@@ -1412,15 +1407,27 @@ foreach ($pipeline in $config.Pipelines) {
 }
 if ($targets.Count -eq 0) {
     Write-Host "No pipeline with a Screen1Select block was found in the config. Nothing to calibrate." -ForegroundColor Red
-    pause
-    exit 1
+    return $false
 }
-$chosenPipeline = $targets[0]
-if ($targets.Count -gt 1) {
+$chosenPipeline = $null
+if ($null -ne $Pipeline) {
+    $chosenPipeline = $targets | Where-Object { $_.Id -eq $Pipeline.Id } | Select-Object -First 1
+    if ($null -eq $chosenPipeline) {
+        Write-Host "Requested pipeline '$($Pipeline.Id)' wasn't found in AutoClipCaptureConfig.json." -ForegroundColor Red
+        return $false
+    }
+} elseif ($targets.Count -eq 1) {
+    $chosenPipeline = $targets[0]
+} else {
     Write-Host "`nMultiple pipelines need calibration. Which one?"
     for ($i = 0; $i -lt $targets.Count; $i++) { Write-Host ("  [{0}] {1} ({2})" -f $i, $targets[$i].Name, $targets[$i].Id) }
     $pIdx = Read-Host "Enter the number"
-    $chosenPipeline = $targets[[int]$pIdx]
+    $parsedPipelineIndex = -1
+    if (-not [int]::TryParse([string]$pIdx, [ref]$parsedPipelineIndex) -or $parsedPipelineIndex -lt 0 -or $parsedPipelineIndex -ge $targets.Count) {
+        Write-Host "Invalid choice. Nothing changed." -ForegroundColor Red
+        return $false
+    }
+    $chosenPipeline = $targets[$parsedPipelineIndex]
 }
 
 # Calibrate the actual selection-field column directly. The COB row is
@@ -1433,12 +1440,17 @@ Write-Host "`nMake sure your terminal window is open, fully visible, and NOT cov
 $windows = [CalibNative4]::GetVisibleWindows()
 $terminalTitlePrefix = '3270-display(32 regels)'
 $terminalWindows = @($windows | Where-Object { $_.Value.StartsWith($terminalTitlePrefix, [System.StringComparison]::OrdinalIgnoreCase) })
-if ($terminalWindows.Count -eq 0) {
+$providedTargetVisible = ($TargetHandle -ne [IntPtr]::Zero) -and [CalibNative4]::IsWindowVisible($TargetHandle)
+if ($providedTargetVisible) {
+    $targetHandle = $TargetHandle
+    $targetInfo = $windows | Where-Object { $_.Key -eq $targetHandle } | Select-Object -First 1
+    $targetTitle = if ($null -ne $targetInfo) { $targetInfo.Value } else { 'selected terminal window' }
+    Write-Host ("`nUsing the already selected mainframe window: {0}" -f $targetTitle) -ForegroundColor Cyan
+} elseif ($terminalWindows.Count -eq 0) {
     Write-Host "`nCouldn't find a visible window whose title starts with '$terminalTitlePrefix'. Nothing changed." -ForegroundColor Red
     Write-Host "Visible windows:"
     foreach ($window in $windows) { Write-Host ("  {0}" -f $window.Value) }
-    pause
-    exit 1
+    return $false
 } elseif ($terminalWindows.Count -eq 1) {
     $targetHandle = $terminalWindows[0].Key
     Write-Host ("`nAutomatically detected mainframe window: {0}" -f $terminalWindows[0].Value) -ForegroundColor Cyan
@@ -1451,8 +1463,7 @@ if ($terminalWindows.Count -eq 0) {
     $parsedWindowIndex = -1
     if (-not [int]::TryParse([string]$winIdx, [ref]$parsedWindowIndex) -or $parsedWindowIndex -lt 0 -or $parsedWindowIndex -ge $terminalWindows.Count) {
         Write-Host "Invalid choice. Nothing changed." -ForegroundColor Red
-        pause
-        exit 1
+        return $false
     }
     $targetHandle = $terminalWindows[$parsedWindowIndex].Key
 }
@@ -1463,8 +1474,7 @@ Write-Host "`nTaking a screenshot and looking for the terminal grid..." -Foregro
 $bmp = Get-WindowScreenshot -Handle $targetHandle
 if ($null -eq $bmp) {
     Write-Host "Couldn't read that window's size/screenshot. Nothing changed." -ForegroundColor Red
-    pause
-    exit 1
+    return $false
 }
 $calibrationClientWidth = $bmp.Width
 $calibrationClientHeight = $bmp.Height
@@ -1476,8 +1486,7 @@ if ($null -eq $box -or ($box.Right - $box.Left) -lt 100 -or ($box.Bottom - $box.
     Write-Host "`nCouldn't confidently find a solid dark terminal rectangle in that window." -ForegroundColor Red
     Write-Host "(Maybe the terminal uses a light color scheme, or another window was on top of it.)" -ForegroundColor Red
     Write-Host "Use CalibrateScreen1AutoGuided.bat instead - it doesn't rely on detecting a dark background." -ForegroundColor Yellow
-    pause
-    exit 1
+    return $false
 }
 
 # ---- Find the REAL first "COB" row on whatever screen is showing
@@ -1506,8 +1515,7 @@ $cobMatch = Get-FirstCobMatch -Text $copiedText
 if ($null -eq $cobMatch) {
     Write-Host "`nCouldn't find any line with 'COB' on the current screen." -ForegroundColor Red
     Write-Host "Navigate the terminal to a REPOSITORY LIST page that actually shows COB rows, then run this again." -ForegroundColor Red
-    pause
-    exit 1
+    return $false
 }
 $clipboardLines = $copiedText -split "`r`n|`n|`r"
 $clipboardWidths = @($clipboardLines | ForEach-Object { $_.Length } | Sort-Object -Unique)
@@ -1531,14 +1539,18 @@ $boxHeight = $box.Bottom - $box.Top
 $CharWidthPx  = [math]::Round(($boxWidth / $cols), 2)
 $CharHeightPx = [math]::Round(($boxHeight / $rows), 2)
 if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $CharHeightPx -gt 50) {
-    Write-Host "Detected terminal is $boxWidth x $boxHeight px; these dimensions imply an implausible cell size ($CharWidthPx x $CharHeightPx px). Nothing changed." -ForegroundColor Red; pause; exit 1
+    Write-Host "Detected terminal is $boxWidth x $boxHeight px; these dimensions imply an implausible cell size ($CharWidthPx x $CharHeightPx px). Nothing changed." -ForegroundColor Red
+    return $false
 }
 $OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
 $OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
 Write-Host ("  Terminal box = {0}x{1} px at ({2},{3}); grid = {4} columns x {5} rows; cell = {6}x{7} px" -f $boxWidth,$boxHeight,$box.Left,$box.Top,$cols,$rows,$CharWidthPx,$CharHeightPx) -ForegroundColor Cyan
 
 $targetColIndex = $calibratedSelectionColumn + $clickColumnOffset
-if ($targetColIndex -lt 0 -or $targetColIndex -ge $cols -or $selectionFieldLastColumn -ge $cols) { Write-Host "Selection field would be outside terminal columns. Nothing changed." -ForegroundColor Red; pause; exit 1 }
+if ($targetColIndex -lt 0 -or $targetColIndex -ge $cols -or $selectionFieldLastColumn -ge $cols) {
+    Write-Host "Selection field would be outside terminal columns. Nothing changed." -ForegroundColor Red
+    return $false
+}
 $confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
 $confirmY = $OriginY + ($realLineIndex * $CharHeightPx)
 
@@ -1547,7 +1559,8 @@ $pt.X = [int][math]::Round($confirmX)
 $pt.Y = [int][math]::Round($confirmY)
 [void][CalibNative4]::ClientToScreen($targetHandle, [ref]$pt)
 if ($confirmX -lt ($box.Left + 0.5) -or $confirmX -ge ($box.Right - 0.5) -or $confirmY -lt ($box.Top + 0.5) -or $confirmY -ge ($box.Bottom - 0.5)) {
-    Write-Host "Computed calibration point is outside the detected terminal area. Nothing changed." -ForegroundColor Red; pause; exit 1
+    Write-Host "Computed calibration point is outside the detected terminal area. Nothing changed." -ForegroundColor Red
+    return $false
 }
 [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($pt.X, $pt.Y)
 
@@ -1561,8 +1574,7 @@ while ($true) {
     if ($key.Key -eq 'Enter') { break }
     if ($key.Key -eq 'Escape') {
         Write-Host "`nCancelled - nothing saved." -ForegroundColor Yellow
-        pause
-        exit 0
+        return $false
     }
 }
 
@@ -1611,16 +1623,16 @@ if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains 'Cali
 }
 
 $backupPath = Join-Path $PSScriptRoot ("AutoClipCaptureConfig.backup-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-Copy-Item -Path $configPath -Destination $backupPath -Force
+Copy-Item -Path $configPath -Destination $backupPath -Force | Out-Null
 Write-Host ("`nBacked up old config to: {0}" -f (Split-Path $backupPath -Leaf))
 
 $config | ConvertTo-Json -Depth 20 | Set-Content -Path $configPath -Encoding UTF8
 
 Write-Host ""
 Write-Host "Done! AutoClipCaptureConfig.json has been updated." -ForegroundColor Green
-Write-Host "Close this window and try Ctrl+Shift+M again." -ForegroundColor Green
+Write-Host "Calibration complete; the caller will continue using the updated settings." -ForegroundColor Green
 Write-Host ""
-pause
+return $true
 }
 # endregion: CalibrateScreen1Auto.ps1
 #=====================================================================
@@ -1638,12 +1650,10 @@ if ($EditConfig) {
 }
 
 if ($Calibrate) {
-    # -Calibrate was passed: run the Screen1 auto-calibration tool and
-    # stop - do not start the capture relay. This branch runs the tool's
-    # own DPI-awareness setup itself (see Invoke-Screen1CalibrationTool
-    # below), so it deliberately does not fall through to the capture
-    # relay's DPI-awareness block right below.
-    Invoke-Screen1CalibrationTool
+    # -Calibrate was passed: run calibration in this process and stop -
+    # do not start the capture relay. The calibration tool sets DPI
+    # awareness before it takes the screenshot.
+    [void](Invoke-Screen1CalibrationTool)
     return
 }
 
@@ -1720,10 +1730,11 @@ public static class CR_DpiAwareness {
  subsequent row maps by its offset from that known row; non-COB rows are
  skipped, and processing ends at the last COB row.
    1. Click/type B/Enter only on rows whose text contains COB.
-      A successful selection must open COMPONENT VERSION; if Enter leaves
-      the terminal on REPOSITORY LIST or reaches an unrecognized screen,
-      the same page is recaptured and the pipeline stops on repeated
-      failure instead of advancing.
+      A successful selection opens COMPONENT VERSION. If the terminal
+      stays on REPOSITORY LIST and the upper-right message changes, click
+      that same row and press Delete to clear B, then continue without F3.
+      A changed upper-right message on COMPONENT VERSION after S/Enter
+      means the source selection failed; press F3 from there and continue.
    1a. Click the calibrated selection field at SelectionColumnIndex
       (ClickColumnOffset is zero) using the pixel math calibrated by
       CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 into
@@ -1760,6 +1771,10 @@ public static class CR_DpiAwareness {
                       has time to render.
    CompZoom_Copy    - Ctrl+C, read the clipboard, work out what
                       happened, branch accordingly (see below).
+   CompReject_Action - click the same row after a REPOSITORY LIST
+                       command error, then remove B with Delete.
+   CompReject_DeleteWait - pause before Delete, then wait before
+                           advancing to the next COB row.
    CompNext_Action  - move past a non-COB row, or decide the next COB
                       row. After the last COB row, show the centered
                       page-complete message and trigger a page turn.
@@ -2121,17 +2136,20 @@ function Invoke-PipelineScreen1Tick {
                     # Screen2.ps1 to log it and select its source row.
                     $global:CR_PipelineScreen1RetryCount   = 0
                     $global:CR_PipelineScreen2CapturedText = $text
+                    $global:CR_PipelineScreen2BeforeSelectionText = $text
                     $global:CR_PipelineSourceSelectionSent = $false
                     $global:CR_PipelineState = 'EnvLog_Action'
                     $global:CR_ElapsedMs     = 0
                 }
                 elseif ($detected -eq 1) {
                     $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
-                    if ($rejected) {
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOLIST rejected the selection for row $($global:CR_PipelineComponentIdx + 1): '$($s1.InvalidCommandText)'. Stopping without retrying or advancing; inspect and clear the command field manually." -ForegroundColor Red
-                        Show-RelayResultOverlay -Text "ROW REJECTED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                        Stop-PipelineCapture
-                        return
+                    $topRightChanged = Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen1PrevPageText -After $text
+                    if ($rejected -or $topRightChanged) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST stayed open and its top-right message changed after B/Enter for row $($global:CR_PipelineComponentIdx + 1). Removing B from that row and advancing without F3." -ForegroundColor Yellow
+                        $global:CR_PipelineState = 'CompReject_Action'
+                        $global:CR_PipelineStepPending = $false
+                        $global:CR_PipelineStepConfirmed = $false
+                        $global:CR_ElapsedMs = 0
                     } else {
                         # Enter should have opened COMPONENT VERSION. Keep
                         # checking this same page briefly for a delayed
@@ -2170,6 +2188,67 @@ function Invoke-PipelineScreen1Tick {
                     }
                     $global:CR_ElapsedMs = 0
                 }
+            }
+        }
+
+        'CompReject_Action' {
+            $rowIdx = [int]$global:CR_PipelineComponentIdx
+            if ($rowIdx -lt 0 -or $rowIdx -ge $global:CR_PipelineScreen1Rows.Count) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Rejected row index is invalid; stopping before Delete." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            $row = $global:CR_PipelineScreen1Rows[$rowIdx]
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Cannot safely return to the rejected B field; calibrated point is outside the terminal. Stopping." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "CANNOT CLEAR ROW COMMAND - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] B/Enter was rejected; about to click row $($rowIdx + 1) and remove B with Delete"
+            if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
+
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping before clearing the rejected B." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Terminal geometry changed while preparing to remove the rejected B. Stopping." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "CANNOT CLEAR ROW COMMAND - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+            Invoke-Screen1RowClick -ScreenPoint $screenPt
+            $global:CR_PipelineState = 'CompReject_DeleteWait'
+            $global:CR_ElapsedMs = 0
+        }
+
+        'CompReject_DeleteWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping before removing B." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('{DELETE}')
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Removed rejected B; advancing without F3" ([System.Drawing.Color]::Orange)
+                $global:CR_PipelineState = 'CompReject_AdvanceWait'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'CompReject_AdvanceWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                $global:CR_PipelineState = 'CompNext_Action'
+                $global:CR_ElapsedMs = 0
             }
         }
 
@@ -2485,7 +2564,15 @@ function Invoke-PipelineScreen2Tick {
                 }
 
                 $detected = Update-PipelineScreenTracking -Text $sourceText -PipelineName $pipeline.Name
-                if ($detected -eq 3) {
+                $componentCommandError = ($detected -eq 2) -and (Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen2BeforeSelectionText -After $sourceText)
+                if ($detected -eq 2 -and $componentCommandError) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION stayed open and its top-right message changed after S/Enter. Treating that as a source-selection error; returning to REPOSITORY LIST with one F3." -ForegroundColor Yellow
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION command error; returning without source capture" ([System.Drawing.Color]::Orange)
+                    $global:CR_PipelineScreen1RetryCount = 0
+                    $global:CR_PipelineAfterBack = 'CompNext_Action'
+                    $global:CR_PipelineState = 'Back_Action'
+                    $global:CR_ElapsedMs = 0
+                } elseif ($detected -eq 3) {
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE verified; starting Auto Capture Current File" ([System.Drawing.Color]::Orange)
                     $global:CR_PipelineSourceCaptureText = $sourceText
                     $global:CR_PipelineState = 'SrcCapture_Start'
@@ -3933,6 +4020,40 @@ function Get-PipelineItemLabel {
     return $FallbackLabel
 }
 
+# Returns a compact signature for the upper-right terminal area from
+# the first few copied screen lines. This distinguishes an in-place
+# mainframe command error from a normal screen that simply did not open.
+function Get-PipelineTopRightSignature {
+    param(
+        [string]$Text,
+        [int]$LineCount = 3,
+        [int]$Width = 20
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $lines = @($Text -split "`r`n|`r|`n")
+    $signature = New-Object System.Collections.Generic.List[string]
+    $limit = [Math]::Min($LineCount, $lines.Count)
+    for ($i = 0; $i -lt $limit; $i++) {
+        $line = ([string]$lines[$i]).TrimEnd()
+        $start = [Math]::Max(0, $line.Length - $Width)
+        $signature.Add(("{0}:{1}" -f $i, $line.Substring($start)))
+    }
+    return ($signature -join "`n")
+}
+
+function Test-PipelineTopRightChanged {
+    param(
+        [string]$Before,
+        [string]$After
+    )
+
+    $beforeSignature = Get-PipelineTopRightSignature -Text $Before
+    $afterSignature = Get-PipelineTopRightSignature -Text $After
+    if ([string]::IsNullOrEmpty($beforeSignature) -or [string]::IsNullOrEmpty($afterSignature)) { return $false }
+    return (-not [string]::Equals($beforeSignature, $afterSignature, [StringComparison]::Ordinal))
+}
+
 # ---- Screen tracking ----
 #
 # Each of the 3 pipeline screens has its own fingerprint in the
@@ -4173,8 +4294,8 @@ function Show-Screen1CalibrationPrompt {
     return ($result -eq $IDYES)
 }
 
-# Runs CalibrateScreen1Auto.ps1 to completion (blocking - waits for the
-# user to accept/cancel it), then re-reads AutoClipCaptureConfig.json
+# Runs calibration in this process (blocking - waits for the user to
+# accept/cancel it), then re-reads AutoClipCaptureConfig.json
 # and copies the fresh OriginX/OriginY/CharWidthPx/CharHeightPx/
 # ClickColumnOffset/FirstDataRowLineIndex/SelectionColumnIndex/
 # CalibrationNote onto the *existing* in-memory $Pipeline.Screen1Select
@@ -4183,17 +4304,13 @@ function Show-Screen1CalibrationPrompt {
 # references to that same object, so calibration takes effect
 # immediately without restarting AutoClipCapture.ps1.
 function Invoke-Screen1CalibrationNow {
-    param($Pipeline)
+    param(
+        $Pipeline,
+        [IntPtr]$TargetHandle = [IntPtr]::Zero
+    )
 
-    $selfScript = $PSCommandPath
-    if ([string]::IsNullOrEmpty($selfScript) -or -not (Test-Path $selfScript)) {
-        Write-Host "[AutoClipCapture] Can't determine this script's own file path to relaunch for calibration." -ForegroundColor Red
-        return
-    }
-
-    Start-Process -FilePath "powershell.exe" `
-        -ArgumentList @('-STA','-NoProfile','-NoLogo','-ExecutionPolicy','Bypass','-File', "`"$selfScript`"", '-Calibrate') `
-        -Wait
+    $calibrationSucceeded = Invoke-Screen1CalibrationTool -Pipeline $Pipeline -TargetHandle $TargetHandle
+    if (-not $calibrationSucceeded) { return }
 
     if (-not (Test-Path $ConfigPath)) { return }
     try {
@@ -4356,6 +4473,7 @@ function Stop-PipelineCapture {
     $global:CR_PipelineScreen1RetryCount   = 0
     $global:CR_PipelineScreen1Rows          = @()
     $global:CR_PipelineScreen2CapturedText = $null
+    $global:CR_PipelineScreen2BeforeSelectionText = $null
     $global:CR_PipelineSourceSelectionSent = $false
     $global:CR_PipelineSourceCaptureText = $null
     $global:CR_PipelineSourceCapturePreviousText = $null
@@ -4558,6 +4676,7 @@ $global:CR_PipelineScreen1PrevPageText = $null # previous page's raw capture, fo
 $global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen"/"no rows found" retries
 $global:CR_PipelineScreen1Rows         = @()   # row slots through last COB: @{ LineIndex; ColIndex; HasCob }
 $global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
+$global:CR_PipelineScreen2BeforeSelectionText = $null # baseline for detecting an in-place S/Enter error banner
 $global:CR_PipelineSourceSelectionSent = $false # enforce at most one S per COMPONENT VERSION page
 $global:CR_PipelineSourceCaptureText = $null
 $global:CR_PipelineSourceCapturePreviousText = $null
@@ -5139,7 +5258,7 @@ $hotkeyAction = {
             if (-not $useComponentList -and $null -ne $pipeline.Screen1Select -and -not (Test-Screen1Calibrated -Screen1Select $pipeline.Screen1Select)) {
                 if (Show-Screen1CalibrationPrompt -PipelineName $pipeline.Name) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Launching Screen1 calibration..." -ForegroundColor Cyan
-                    Invoke-Screen1CalibrationNow -Pipeline $pipeline
+                    Invoke-Screen1CalibrationNow -Pipeline $pipeline -TargetHandle $target.Handle
                     if (-not (Test-Screen1Calibrated -Screen1Select $pipeline.Screen1Select)) {
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still not calibrated - start cancelled." -ForegroundColor Yellow
                         Hide-RelayStatus
