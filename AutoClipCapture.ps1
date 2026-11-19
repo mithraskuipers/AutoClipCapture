@@ -296,10 +296,6 @@ function Show-ConfigEditorGui {
 =====================================================================
 #>
 
-# Source-code Auto Capture Current File pacing. Lower this value to make
-# the paging/copy loop faster; it is used after F8 and after Ctrl+C.
-$SourceCaptureWaitMs = 250
-
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -327,6 +323,39 @@ function Get-DefaultSqlSearchMode {
     }
 }
 
+function Get-DefaultPipelineTimingsMs {
+    [pscustomobject]@{
+        RepositoryList = [pscustomobject]@{
+            BeforeClickMs = 0
+            AfterClickMs = 1000
+            AfterSelectionLetterMs = 1000
+            AfterEnterMs = 1000
+            AfterClipboardCopyMs = 1000
+            InitialScanAfterClipboardCopyMs = 250
+            AfterPageKeyMs = 1000
+            AfterDeleteMs = 1000
+            AfterF3Ms = 1000
+        }
+        ComponentVersion = [pscustomobject]@{
+            BeforeClickMs = 0
+            AfterClickMs = 1000
+            AfterSelectionLetterMs = 1000
+            AfterEnterMs = 1000
+            AfterClipboardCopyMs = 1000
+            AfterF3Ms = 1000
+        }
+        SourceCode = [pscustomobject]@{
+            AfterActionKeyMs = 250
+            AfterClipboardCopyMs = 250
+            AfterF3Ms = 1000
+        }
+        ComponentList = [pscustomobject]@{
+            AfterPageKeyMs = 250
+            AfterClipboardCopyMs = 250
+        }
+    }
+}
+
 function Get-DefaultConfig {
     [pscustomobject]@{
         LogFile                 = "CapturedOutput.txt"
@@ -343,6 +372,7 @@ function Get-DefaultConfig {
         ExitHotkey              = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X"; RequireRightModifier = $false }
         F3Hotkey                = [pscustomobject]@{ Modifiers = 5; Key = 0xBC; Display = "Alt+<"; RequireRightModifier = $false }  # Alt+Shift+Comma ('<')
         ResultOverlayDurationMs = 4000
+        PipelineTimingsMs       = Get-DefaultPipelineTimingsMs
         Modes                   = @( Get-DefaultSqlSearchMode )
     }
 }
@@ -1013,6 +1043,7 @@ $btnSave.Add_Click({
         F3Hotkey                 = [pscustomobject]@{ Modifiers = $script:F3Mods;     Key = $script:F3Key;     Display = $txtF3.Text;     RequireRightModifier = [bool]$chkF3Right.Checked }
         ResultOverlayDurationMs  = [int]$numOverlayDur.Value
         Modes                    = $modesForSave
+        PipelineTimingsMs         = if ($existing.PSObject.Properties.Name -contains 'PipelineTimingsMs') { $existing.PipelineTimingsMs } else { Get-DefaultPipelineTimingsMs }
         # Pipelines aren't edited by this GUI (see the header comment
         # in AutoClipCapture.ps1) - carry whatever was already in the
         # file straight through so saving settings here can't silently
@@ -1968,7 +1999,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompScan_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.InitialScanAfterClipboardCopyMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2038,6 +2069,10 @@ function Invoke-PipelineScreen1Tick {
             $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to click here, type '$($s1.SelectionText)' + Enter"
             if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
 
+            if ([int]$PipelineTimingsMs.RepositoryList.BeforeClickMs -gt 0) {
+                Start-Sleep -Milliseconds ([int]$PipelineTimingsMs.RepositoryList.BeforeClickMs)
+            }
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
@@ -2076,7 +2111,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompZoom_Type' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2090,7 +2125,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompZoom_Enter' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterSelectionLetterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2104,7 +2139,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompZoom_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterEnterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2118,7 +2153,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompZoom_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2231,7 +2266,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompReject_DeleteWait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping before removing B." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2246,7 +2281,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompReject_AdvanceWait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterDeleteMs) {
                 $global:CR_PipelineState = 'CompNext_Action'
                 $global:CR_ElapsedMs = 0
             }
@@ -2291,7 +2326,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompPage_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterPageKeyMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2305,7 +2340,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompPage_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2482,6 +2517,10 @@ function Invoke-PipelineScreen2Tick {
             $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION row 8, marker $($sourceMatch.Value) - about to click two columns left, type S + Enter"
             if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
 
+            if ([int]$PipelineTimingsMs.ComponentVersion.BeforeClickMs -gt 0) {
+                Start-Sleep -Milliseconds ([int]$PipelineTimingsMs.ComponentVersion.BeforeClickMs)
+            }
+
             if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                 Stop-PipelineCapture
@@ -2502,7 +2541,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_TypeWait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterClickMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2524,7 +2563,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_EnterWait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterSelectionLetterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2539,7 +2578,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterEnterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2553,7 +2592,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterClipboardCopyMs) {
                 $sourceText = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2729,7 +2768,7 @@ function Invoke-PipelineScreen3Tick {
 
         'SrcCapture_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $SourceCaptureWaitMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.SourceCode.AfterActionKeyMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone during source capture. Stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2744,7 +2783,7 @@ function Invoke-PipelineScreen3Tick {
 
         'SrcCapture_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $SourceCaptureWaitMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.SourceCode.AfterClipboardCopyMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2860,7 +2899,7 @@ function Invoke-PipelineListTick {
 
         'ListCapture_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentList.AfterPageKeyMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2874,7 +2913,7 @@ function Invoke-PipelineListTick {
 
         'ListCapture_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentList.AfterClipboardCopyMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2969,6 +3008,7 @@ function Get-DefaultConfig {
         PipelineStepConfirmEnabled = $true
         StepConfirmHotkey     = [pscustomobject]@{ Modifiers = 0; Key = 0x27; Display = "Right Arrow" }   # VK_RIGHT
         ResultOverlayDurationMs = 4000
+        PipelineTimingsMs     = Get-DefaultPipelineTimingsMs
         Modes                 = @( Get-DefaultSqlSearchMode )
         Pipelines             = @()
     }
@@ -3042,9 +3082,27 @@ foreach ($d in @($TxtDir, $CblDir)) {
 
 $CopyDelayMs = [int]$Config.CopyDelayMs
 $TimerTickMs = [int]$Config.TimerTickMs
-# The repository pipeline gives each terminal interaction a full second
-# to settle, independently of the shorter delays used by other modes.
-$PipelineStepDelayMs = 1000
+
+# Backfill timing fields introduced after older config files were created.
+# All PipelineTimingsMs values are milliseconds; edit the JSON to tune each
+# page and action independently. Missing fields retain the safe defaults.
+$defaultPipelineTimings = Get-DefaultPipelineTimingsMs
+if (-not ($Config.PSObject.Properties.Name -contains 'PipelineTimingsMs') -or $null -eq $Config.PipelineTimingsMs) {
+    $Config | Add-Member -NotePropertyName PipelineTimingsMs -NotePropertyValue $defaultPipelineTimings -Force
+}
+foreach ($pageProperty in $defaultPipelineTimings.PSObject.Properties) {
+    $pageName = $pageProperty.Name
+    if (-not ($Config.PipelineTimingsMs.PSObject.Properties.Name -contains $pageName) -or $null -eq $Config.PipelineTimingsMs.$pageName) {
+        $Config.PipelineTimingsMs | Add-Member -NotePropertyName $pageName -NotePropertyValue $pageProperty.Value -Force
+        continue
+    }
+    foreach ($delayProperty in $pageProperty.Value.PSObject.Properties) {
+        if (-not ($Config.PipelineTimingsMs.$pageName.PSObject.Properties.Name -contains $delayProperty.Name)) {
+            $Config.PipelineTimingsMs.$pageName | Add-Member -NotePropertyName $delayProperty.Name -NotePropertyValue $delayProperty.Value -Force
+        }
+    }
+}
+$PipelineTimingsMs = $Config.PipelineTimingsMs
 
 if ($Config.PSObject.Properties.Name -contains 'AfterActionKeyDelayMs') {
     $AfterActionKeyDelayMs = [int]$Config.AfterActionKeyDelayMs
@@ -3978,10 +4036,11 @@ function Get-AutoCaptureBaseName {
 
     $text = $null
     $waited = 0
-    $maxWait = [Math]::Max($CopyDelayMs * 4, 1000)
+    $sourceCopyDelayMs = [Math]::Max(1, [int]$PipelineTimingsMs.SourceCode.AfterClipboardCopyMs)
+    $maxWait = [Math]::Max($sourceCopyDelayMs * 4, 1000)
     while ($waited -lt $maxWait) {
-        Start-Sleep -Milliseconds $CopyDelayMs
-        $waited += $CopyDelayMs
+        Start-Sleep -Milliseconds $sourceCopyDelayMs
+        $waited += $sourceCopyDelayMs
         try {
             if ([System.Windows.Forms.Clipboard]::ContainsText()) {
                 $candidate = [System.Windows.Forms.Clipboard]::GetText()
@@ -4748,7 +4807,12 @@ $tickAction = {
                 }
                 'Back_Wait' {
                     $global:CR_ElapsedMs += $TimerTickMs
-                    if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                    $backDelayMs = switch ([int]$global:CR_PipelineCurrentScreen) {
+                        3 { [int]$PipelineTimingsMs.SourceCode.AfterF3Ms }
+                        2 { [int]$PipelineTimingsMs.ComponentVersion.AfterF3Ms }
+                        default { [int]$PipelineTimingsMs.RepositoryList.AfterF3Ms }
+                    }
+                    if ($global:CR_ElapsedMs -ge $backDelayMs) {
                         if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                             Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                             Stop-PipelineCapture
@@ -4761,7 +4825,12 @@ $tickAction = {
                 }
                 'Back_Copy' {
                     $global:CR_ElapsedMs += $TimerTickMs
-                    if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                    $backCopyDelayMs = if ($global:CR_PipelineAfterBack -eq 'CompNext_Action') {
+                        [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs
+                    } else {
+                        [int]$PipelineTimingsMs.ComponentVersion.AfterClipboardCopyMs
+                    }
+                    if ($global:CR_ElapsedMs -ge $backCopyDelayMs) {
                         $text = ''
                         try {
                             if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -4910,7 +4979,7 @@ $tickAction = {
             }
             'PostCopy' {
                 $global:CR_ElapsedMs += $TimerTickMs
-                if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.SourceCode.AfterClipboardCopyMs) {
                     $stopRequested = $false
                     try {
                         if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -4986,7 +5055,7 @@ $tickAction = {
             }
             'PostAction' {
                 $global:CR_ElapsedMs += $TimerTickMs
-                if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.SourceCode.AfterActionKeyMs) {
                     $global:CR_State = 'Idle'
                 }
             }

@@ -134,5 +134,35 @@
                                       "MaxIterations":  500
                                   }
                       }
-                  ]
+                  ],
+    "PipelineTimingsMs":  {
+        "RepositoryList":  {
+            "BeforeClickMs":  0,
+            "AfterClickMs":  1000,
+            "AfterSelectionLetterMs":  1000,
+            "AfterEnterMs":  1000,
+            "AfterClipboardCopyMs":  1000,
+            "InitialScanAfterClipboardCopyMs":  250,
+            "AfterPageKeyMs":  1000,
+            "AfterDeleteMs":  1000,
+            "AfterF3Ms":  1000
+        },
+        "ComponentVersion":  {
+            "BeforeClickMs":  0,
+            "AfterClickMs":  1000,
+            "AfterSelectionLetterMs":  1000,
+            "AfterEnterMs":  1000,
+            "AfterClipboardCopyMs":  1000,
+            "AfterF3Ms":  1000
+        },
+        "SourceCode":  {
+            "AfterActionKeyMs":  250,
+            "AfterClipboardCopyMs":  250,
+            "AfterF3Ms":  1000
+        },
+        "ComponentList":  {
+            "AfterPageKeyMs":  250,
+            "AfterClipboardCopyMs":  250
+        }
+    }
 }
