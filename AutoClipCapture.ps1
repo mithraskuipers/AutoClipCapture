@@ -2379,9 +2379,20 @@ function Invoke-PipelineScreen2Tick {
             }
 
             $sourceLine = [string]$sourceCandidates[0].Line
-            $existingSelection = if ($sourceCol -lt $sourceLine.Length) { [string]$sourceLine.Substring($sourceCol, 1) } else { '' }
-            if ($existingSelection.Equals('S', [StringComparison]::OrdinalIgnoreCase)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 already has S in the selection cell left of $($sourceMatch.Value); skipping S and pressing Enter only." -ForegroundColor DarkGray
+            $leftOfMarker = $sourceLine.Substring(0, [Math]::Min($sourceMatch.Index, $sourceLine.Length))
+            $existingSelections = [regex]::Matches(
+                $leftOfMarker,
+                '(?<![A-Z0-9])S(?![A-Z0-9])',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            if ($existingSelections.Count -gt 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 has more than one standalone S before $($sourceMatch.Value). Stopping to avoid submitting an invalid command." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "MULTIPLE S COMMANDS - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            if ($existingSelections.Count -eq 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 already has S before $($sourceMatch.Value); skipping S and pressing Enter only." -ForegroundColor DarkGray
                 $global:CR_PipelineSourceSelectionSent = $true
                 $global:CR_PipelineState = 'EnvSelect_EnterWait'
                 $global:CR_ElapsedMs = 0
