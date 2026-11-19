@@ -1432,14 +1432,10 @@ if ($targets.Count -gt 1) {
     $chosenPipeline = $targets[[int]$pIdx]
 }
 
-# ClickColumnOffset: how many characters LEFT of "COB" the selection
-# field sits. This is the only fixed assumption left - unlike the old
-# cobColumn/firstDataRow guesses, AutoClipCaptureSqlPipelineScreen1.ps1
-# never assumes which column/row "COB" itself is on; it finds "COB" on
-# the real screen first and adds this offset to whatever column that
-# turned out to be. The preview below now does exactly the same thing,
-# so there's no separate row/column guess left to go stale.
-$clickColumnOffset = -2
+# Calibrate the actual selection-field column directly. The COB row is
+# still used as a known row anchor, but the field's horizontal position
+# is not assumed to be a fixed number of cells from the COB text.
+$clickColumnOffset = 0
 $chosenPipeline.Screen1Select.ClickColumnOffset = $clickColumnOffset
 
 Write-Host "`nMake sure your terminal window is open, fully visible, and NOT covered by another window." -ForegroundColor Cyan
@@ -1530,18 +1526,18 @@ if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $Char
     Write-Host "Detected terminal is $boxWidth x $boxHeight px; these dimensions imply an implausible cell size ($CharWidthPx x $CharHeightPx px). Nothing changed." -ForegroundColor Red; pause; exit 1
 }
 $screenRow = Read-Host ("Enter the visible 0-based screen row for this first COB data row (clipboard line was {0})" -f $cobMatch.LineIndex)
-$screenCol = Read-Host ("Enter the visible 0-based screen column where COB begins (clipboard column was {0})" -f $cobMatch.ColIndex)
+$screenCol = Read-Host "Enter the visible 0-based screen column of the selection field immediately left of COB"
 $parsedScreenRow = -1; $parsedScreenCol = -1
 if (-not [int]::TryParse([string]$screenRow, [ref]$parsedScreenRow) -or -not [int]::TryParse([string]$screenCol, [ref]$parsedScreenCol) -or $parsedScreenRow -lt 0 -or $parsedScreenRow -ge $rows -or $parsedScreenCol -lt 0 -or $parsedScreenCol -ge $cols) {
     Write-Host "The visible COB row/column is outside the terminal grid. Nothing changed." -ForegroundColor Red; pause; exit 1
 }
 $realLineIndex = $parsedScreenRow
-$calibratedCobColumn = $parsedScreenCol
+$calibratedSelectionColumn = $parsedScreenCol
 $OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
 $OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
 Write-Host ("  Terminal box = {0}x{1} px at ({2},{3}); grid = {4} columns x {5} rows; cell = {6}x{7} px" -f $boxWidth,$boxHeight,$box.Left,$box.Top,$cols,$rows,$CharWidthPx,$CharHeightPx) -ForegroundColor Cyan
 
-$targetColIndex = $calibratedCobColumn + $clickColumnOffset
+$targetColIndex = $calibratedSelectionColumn + $clickColumnOffset
 if ($targetColIndex -lt 0 -or $targetColIndex -ge $cols) { Write-Host "Selection field would be outside terminal columns. Nothing changed." -ForegroundColor Red; pause; exit 1 }
 $confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
 $confirmY = $OriginY + ($realLineIndex * $CharHeightPx)
@@ -1556,7 +1552,7 @@ if ($confirmX -lt ($box.Left + 0.5) -or $confirmX -ge ($box.Right - 0.5) -or $co
 [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($pt.X, $pt.Y)
 
 Write-Host ""
-Write-Host "Pointer moved to the computed first-data-row selection field (next to 'COB')." -ForegroundColor Cyan
+Write-Host "Pointer moved to the selection field on the known first COB data row." -ForegroundColor Cyan
 Write-Host "Look at the terminal - does it land there? ENTER to save, Esc to cancel." -ForegroundColor Cyan
 Write-Host "(Reminder: this assumes 100% display scaling and today's font/window size." -ForegroundColor DarkGray
 Write-Host " Recalibrate if either changes later.)" -ForegroundColor DarkGray
@@ -1597,10 +1593,10 @@ foreach ($geometry in @(
 # Get-Screen1FixedRows). They only need to be right once: LineIndex is
 # where row 1 of data sits (only valid because the header above the
 # list is always the same fixed size), ColIndex is where "Type" text
-# (COB/ASM) starts - the selection field itself is ColIndex + ClickColumnOffset.
+# (COB/ASM) starts - the saved column is the calibrated selection field; ClickColumnOffset is zero.
 foreach ($prop in @(
     @{ Name = 'FirstDataRowLineIndex'; Value = $realLineIndex },
-    @{ Name = 'SelectionColumnIndex';  Value = $calibratedCobColumn }
+    @{ Name = 'SelectionColumnIndex';  Value = $calibratedSelectionColumn }
 )) {
     if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains $prop.Name)) {
         $chosenPipeline.Screen1Select | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
@@ -1738,9 +1734,8 @@ public static class CR_DpiAwareness {
       doesn't navigate anywhere; step 4 below already treats that as
       the normal "nothing happened, move on" case, so no separate
       blank-detection step is needed.
-   1a. Click Screen1Select.ClickColumnOffset character columns to the
-      left of SelectionColumnIndex (default -2, lands on the "_"
-      selection field) using the pixel math calibrated by
+   1a. Click the calibrated selection field at SelectionColumnIndex
+      (ClickColumnOffset is zero) using the pixel math calibrated by
       CalibrateScreen1Auto.ps1/CalibrateScreen1AutoGuided.ps1 into
       Pipelines[].Screen1Select (OriginX/OriginY/CharWidthPx/
       CharHeightPx).
@@ -2801,7 +2796,7 @@ function Add-PipelineScreen1SelectDefaults {
         OriginY            = 0
         CharWidthPx        = 0
         CharHeightPx       = 0
-        ClickColumnOffset  = -2
+        ClickColumnOffset  = 0
         SelectionText      = 'B'
         RowsPerPage        = 25
         StartRowOffset     = 0
@@ -3874,7 +3869,11 @@ function Invoke-Screen1CalibrationNow {
     $Pipeline.Screen1Select.CharWidthPx      = $freshPipeline.Screen1Select.CharWidthPx
     $Pipeline.Screen1Select.CharHeightPx     = $freshPipeline.Screen1Select.CharHeightPx
     $Pipeline.Screen1Select.ClickColumnOffset = $freshPipeline.Screen1Select.ClickColumnOffset
-    foreach ($fieldName in @('CalibrationNote', 'FirstDataRowLineIndex', 'SelectionColumnIndex')) {
+    foreach ($fieldName in @(
+        'CalibrationNote', 'FirstDataRowLineIndex', 'SelectionColumnIndex',
+        'TerminalLeft', 'TerminalTop', 'TerminalWidth', 'TerminalHeight',
+        'TerminalColumns', 'TerminalRows', 'CalibrationClientWidth', 'CalibrationClientHeight'
+    )) {
         if ($Pipeline.Screen1Select.PSObject.Properties.Name -contains $fieldName) {
             $Pipeline.Screen1Select.$fieldName = $freshPipeline.Screen1Select.$fieldName
         } else {
