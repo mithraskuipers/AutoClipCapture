@@ -1439,18 +1439,32 @@ $clickColumnOffset = 0
 $chosenPipeline.Screen1Select.ClickColumnOffset = $clickColumnOffset
 
 Write-Host "`nMake sure your terminal window is open, fully visible, and NOT covered by another window." -ForegroundColor Cyan
-Write-Host "Open windows:"
 $windows = [CalibNative4]::GetVisibleWindows()
-for ($i = 0; $i -lt $windows.Count; $i++) {
-    Write-Host ("  [{0}] {1}" -f $i, $windows[$i].Value)
-}
-$winIdx = Read-Host "`nType the number next to your mainframe terminal window"
-if (-not ($winIdx -as [int]) -or [int]$winIdx -lt 0 -or [int]$winIdx -ge $windows.Count) {
-    Write-Host "Invalid choice. Nothing changed." -ForegroundColor Red
+$terminalTitlePrefix = '3270-display(32 regels)'
+$terminalWindows = @($windows | Where-Object { $_.Value.StartsWith($terminalTitlePrefix, [System.StringComparison]::OrdinalIgnoreCase) })
+if ($terminalWindows.Count -eq 0) {
+    Write-Host "`nCouldn't find a visible window whose title starts with '$terminalTitlePrefix'. Nothing changed." -ForegroundColor Red
+    Write-Host "Visible windows:"
+    foreach ($window in $windows) { Write-Host ("  {0}" -f $window.Value) }
     pause
     exit 1
+} elseif ($terminalWindows.Count -eq 1) {
+    $targetHandle = $terminalWindows[0].Key
+    Write-Host ("`nAutomatically detected mainframe window: {0}" -f $terminalWindows[0].Value) -ForegroundColor Cyan
+} else {
+    Write-Host "`nMultiple mainframe windows matched. Select the terminal to calibrate:"
+    for ($i = 0; $i -lt $terminalWindows.Count; $i++) {
+        Write-Host ("  [{0}] {1}" -f $i, $terminalWindows[$i].Value)
+    }
+    $winIdx = Read-Host "Enter the number of the intended terminal window"
+    $parsedWindowIndex = -1
+    if (-not [int]::TryParse([string]$winIdx, [ref]$parsedWindowIndex) -or $parsedWindowIndex -lt 0 -or $parsedWindowIndex -ge $terminalWindows.Count) {
+        Write-Host "Invalid choice. Nothing changed." -ForegroundColor Red
+        pause
+        exit 1
+    }
+    $targetHandle = $terminalWindows[$parsedWindowIndex].Key
 }
-$targetHandle = $windows[[int]$winIdx].Key
 [void][CalibNative4]::SetForegroundWindow($targetHandle)
 Start-Sleep -Milliseconds 300   # give it a moment to actually come to the front before the screenshot
 
