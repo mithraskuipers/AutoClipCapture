@@ -4181,27 +4181,49 @@ function Test-PipelineTopRightChanged {
 
 # ---- Screen tracking ----
 #
-# Each of the 3 pipeline screens has its own fingerprint in the
-# captured text, independent of which state the pipeline *thinks*
-# it's in:
-#   Screen 1 (repository list) -> "REPOSITORY LIST" on clipboard row 0
-#   Screen 2 (component version) -> "COMPONENT VERSION" on clipboard row 0
-#   Screen 3 (source code)      -> "Menu  Utilities  Compilers  Help" on row 0
-# Returns 1, 2, 3, or 0 for text that matches none of them - a popup,
-# an error, a logout screen, or anything else unrecognized.
+# Identify the current page from copied row 0 (the emulator's top data
+# row), rather than trusting the state machine's expected destination.
+# COMPONENT VERSION is the displayed heading used for the component list
+# page in this workflow; accept COMPONENT LIST as an alternate heading.
+function Get-PipelineScreenName {
+    param([string]$Text)
+
+    $topRow = ''
+    if (-not [string]::IsNullOrEmpty($Text)) {
+        $topRow = ($Text -split "`r`n|`r|`n", 2)[0]
+    }
+    if (Test-RelayTextContains -Text $topRow -Needle 'REPOSITORY LIST') { return 'REPOSITORY LIST' }
+    if ((Test-RelayTextContains -Text $topRow -Needle 'COMPONENT LIST') -or
+        (Test-RelayTextContains -Text $topRow -Needle 'COMPONENT VERSION')) {
+        return 'COMPONENT LIST'
+    }
+    if (Test-RelayTextContains -Text $topRow -Needle 'Menu  Utilities  Compilers  Help') { return 'SOURCE CODE' }
+    return 'UNKNOWN'
+}
+
+# Preserve the numeric page IDs used by the pipeline state machine, while
+# deriving them from the human-readable page check above.
 function Get-PipelineScreenNumber {
     param([string]$Text)
 
-    $firstLine = ''
-    if (-not [string]::IsNullOrEmpty($Text)) {
-        $firstLine = ($Text -split "`r`n|`r|`n", 2)[0]
+    $pageName = Get-PipelineScreenName -Text $Text
+    switch ($pageName) {
+        'REPOSITORY LIST' { return 1 }
+        'COMPONENT LIST'  { return 2 }
+        'SOURCE CODE'     { return 3 }
+        default           { return 0 }
     }
-    if (Test-RelayTextContains -Text $firstLine -Needle 'REPOSITORY LIST') { return 1 }
-    if (Test-RelayTextContains -Text $firstLine -Needle 'COMPONENT VERSION') { return 2 }
-    if (Test-RelayTextContains -Text $firstLine -Needle 'Menu  Utilities  Compilers  Help') {
-        return 3
+}
+
+function Get-PipelineScreenNameFromNumber {
+    param([int]$ScreenNumber)
+
+    switch ($ScreenNumber) {
+        1 { return 'REPOSITORY LIST' }
+        2 { return 'COMPONENT LIST' }
+        3 { return 'SOURCE CODE' }
+        default { return 'UNKNOWN' }
     }
-    return 0
 }
 
 # Detects the screen from freshly-captured text, compares it against
@@ -4209,7 +4231,7 @@ function Get-PipelineScreenNumber {
 # logs whether we progressed, went back, stayed put, or landed
 # somewhere unrecognized, then updates the tracked value and returns
 # the detected screen number. Called at every clipboard capture point
-# across all 3 screen files, so the console always shows the real,
+# across all screen files, so the console always shows the real,
 # independently-verified screen - not just what the state machine
 # assumed would happen.
 function Update-PipelineScreenTracking {
@@ -4220,17 +4242,19 @@ function Update-PipelineScreenTracking {
 
     $detected = Get-PipelineScreenNumber -Text $Text
     $previous = $global:CR_PipelineCurrentScreen
+    $detectedName = Get-PipelineScreenNameFromNumber -ScreenNumber $detected
+    $previousName = Get-PipelineScreenNameFromNumber -ScreenNumber ([int]$previous)
 
     if ($detected -eq 0) {
-        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: unrecognized screen (was screen $previous)." -ForegroundColor Yellow
+        Write-Host "[AutoClipCapture] [$PipelineName] Page check: top row did not match REPOSITORY LIST, COMPONENT LIST, or SOURCE CODE (was $previousName)." -ForegroundColor Yellow
     } elseif ($previous -eq 0) {
-        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: now on screen $detected." -ForegroundColor DarkCyan
+        Write-Host "[AutoClipCapture] [$PipelineName] Page check: now on $detectedName (identified from copied top row)." -ForegroundColor DarkCyan
     } elseif ($detected -eq $previous) {
-        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: stayed on screen $detected." -ForegroundColor DarkCyan
+        Write-Host "[AutoClipCapture] [$PipelineName] Page check: stayed on $detectedName." -ForegroundColor DarkCyan
     } elseif ($detected -gt $previous) {
-        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: progressed from screen $previous to screen $detected." -ForegroundColor DarkCyan
+        Write-Host "[AutoClipCapture] [$PipelineName] Page check: moved from $previousName to $detectedName." -ForegroundColor DarkCyan
     } else {
-        Write-Host "[AutoClipCapture] [$PipelineName] Screen check: went back from screen $previous to screen $detected." -ForegroundColor DarkCyan
+        Write-Host "[AutoClipCapture] [$PipelineName] Page check: returned from $previousName to $detectedName." -ForegroundColor DarkCyan
     }
 
     $global:CR_PipelineCurrentScreen = $detected
