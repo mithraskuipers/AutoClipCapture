@@ -2726,8 +2726,9 @@ function Invoke-PipelineScreen2Tick {
 
  Screen 3 = the COBOL source-code page, recognized by the row-0 menu
  text "Menu  Utilities  Compilers  Help". Once verified, run the same
- capture loop as Auto Capture Current File: append filtered screens to
- the component's .txt/.cbl files, send the configured action key (F8 by
+ capture loop as Auto Capture Current File: replace any earlier
+ component .txt/.cbl files, then append filtered screens to this run's
+ files, send the configured action key (F8 by
  default), and stop when the captured screen repeats. Only then queue
  the single F3 return to Screen 1. Unexpected Sql_* states fail safely.
 =====================================================================
@@ -2768,6 +2769,18 @@ function Invoke-PipelineScreen3Tick {
 
             $global:CR_PipelineSourceLogFile = Join-Path $TxtDir ($baseName + '.txt')
             $global:CR_PipelineSourceLogFileCbl = Join-Path $CblDir ($baseName + '.cbl')
+            try {
+                # Each run is a fresh capture for this component. Truncate
+                # both outputs before the first page is written so older
+                # source text can never remain appended to the new capture.
+                [System.IO.File]::WriteAllText($global:CR_PipelineSourceLogFile, '')
+                [System.IO.File]::WriteAllText($global:CR_PipelineSourceLogFileCbl, '')
+            } catch {
+                $reason = "Could not overwrite the previous source capture for '$baseName': $_"
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
+                return
+            }
             $global:CR_PipelineSourceCapturePreviousText = $null
             $global:CR_PipelineSourceCapturePages = 0
             $global:CR_PipelineSourceCaptureRetries = 0
