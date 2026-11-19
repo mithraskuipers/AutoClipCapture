@@ -2300,17 +2300,19 @@ function Invoke-PipelineScreen1Tick {
 =====================================================================
  AutoClipCaptureSqlPipelineScreen2.ps1
 
- Screen 2 = COMPONENT VERSION. Log the page, find the unique PROD/UT/ET
- marker in copied text, then use its column as a clue to select screen
- row 8 two columns left with S and Enter. Clipboard line indices are
+ Screen 2 = COMPONENT VERSION. Log the page and find the unique
+ PROD/UT/ET marker in copied text. Check the selection cell two columns
+ to its left: if it already contains S, press Enter without typing;
+ otherwise type one S, then press Enter. Clipboard line indices are
  not treated as screen rows. Only after Screen 3's source-code menu is
  verified on row 0 does the shared F3 state return to Screen 1.
 
  States (start with "Env" so AutoClipCapture.ps1 routes them here):
    EnvLog_Action     - log the captured COMPONENT VERSION page.
    EnvSelect_Action  - locate the unique PROD/UT/ET marker in copied
-                       text, click two columns left on screen row 8,
-                       type S, and press Enter.
+                       text and check its selection cell on screen row 8.
+   EnvSelect_TypeWait - only if needed, wait and type one S.
+   EnvSelect_EnterWait - wait and press Enter, with or without typing S.
    EnvSelect_Wait    - wait for the source-code screen to render.
    EnvSelect_Copy    - copy and verify the source-code menu on row 0;
                        only then queue the single F3 return.
@@ -2353,7 +2355,10 @@ function Invoke-PipelineScreen2Tick {
             for ($lineIndex = 0; $lineIndex -lt $componentLines.Count; $lineIndex++) {
                 $matches = [regex]::Matches($componentLines[$lineIndex], '\b(?:PROD|UT|ET)\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                 foreach ($match in $matches) {
-                    $sourceCandidates += [pscustomobject]@{ Match = $match }
+                    $sourceCandidates += [pscustomobject]@{
+                        Match = $match
+                        Line = $componentLines[$lineIndex]
+                    }
                 }
             }
             if ($sourceCandidates.Count -ne 1) {
@@ -2370,6 +2375,16 @@ function Invoke-PipelineScreen2Tick {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Selection column two characters left of $($sourceMatch.Value) on COMPONENT VERSION row 8 is outside the terminal grid. Stopping before F3." -ForegroundColor Red
                 Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
                 Stop-PipelineCapture
+                return
+            }
+
+            $sourceLine = [string]$sourceCandidates[0].Line
+            $existingSelection = if ($sourceCol -lt $sourceLine.Length) { [string]$sourceLine.Substring($sourceCol, 1) } else { '' }
+            if ($existingSelection.Equals('S', [StringComparison]::OrdinalIgnoreCase)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 already has S in the selection cell left of $($sourceMatch.Value); skipping S and pressing Enter only." -ForegroundColor DarkGray
+                $global:CR_PipelineSourceSelectionSent = $true
+                $global:CR_PipelineState = 'EnvSelect_EnterWait'
+                $global:CR_ElapsedMs = 0
                 return
             }
 
