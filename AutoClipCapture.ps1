@@ -1696,9 +1696,8 @@ public static class CR_DpiAwareness {
     Write-Host "[AutoClipCapture] Could not set DPI awareness - if Windows display scaling isn't 100%, clicks may land off-target. $_" -ForegroundColor Yellow
 }
 
-# Pipeline screen logic lives in its own file per screen, all kept in
-# this same folder (no subfolders): Screen 1 = components,
-# Screen 2 = environments, Screen 3 = the COBOL/SQL search screen.
+# Pipeline screen logic lives in this same script: Screen 1 = the
+# repository list, Screen 2 = component version, Screen 3 = source code.
 # ComponentList is an optional "Step 1" pre-pass that also lives on
 # Screen 1 (paging through the full component overview once, up
 # front, before any zooming happens) - kept in its own file since it's
@@ -1708,8 +1707,8 @@ public static class CR_DpiAwareness {
 # Pipeline screen logic used to live in its own file per screen (dot-sourced
 # at startup); they're now inlined directly below as clearly marked regions,
 # in the same order they used to be dot-sourced. Nothing about how they work
-# changed - Screen 1 = components, Screen 2 = environments, Screen 3 = the
-# COBOL/SQL search screen, and ComponentList = the optional Screen 1
+# changed - Screen 1 = repository list, Screen 2 = component version,
+# Screen 3 = source code, and ComponentList = the optional Screen 1
 # paging pre-pass.
 
 #=====================================================================
@@ -1729,7 +1728,7 @@ public static class CR_DpiAwareness {
  subsequent row maps by its offset from that known row; non-COB rows are
  skipped, and processing ends at the last COB row.
    1. Click/type B/Enter only on rows whose text contains COB.
-      A successful selection must open COMPONENT LIST; if Enter leaves
+      A successful selection must open COMPONENT VERSION; if Enter leaves
       the terminal on REPOSITORY LIST or reaches an unrecognized screen,
       the same page is recaptured and the pipeline stops on repeated
       failure instead of advancing.
@@ -1739,8 +1738,10 @@ public static class CR_DpiAwareness {
       Pipelines[].Screen1Select (OriginX/OriginY/CharWidthPx/
       CharHeightPx).
    2. Type Screen1Select.SelectionText (default "B") and press Enter.
-   3. Confirm we landed on COMPONENT LIST. Log it (if enabled), press
-      F3, and verify that REPOSITORY LIST returned.
+   3. Confirm COMPONENT VERSION, find its PROD/UT/ET source row in
+      copied text, then select calibrated screen row 8 two columns to
+      the left with S and Enter. Confirm the source-code menu on row 0,
+      then press F3 and verify REPOSITORY LIST returned.
    4. Only after that verified return, continue to the next COB row.
    5. When the last COB row on the page is processed, show a centered
       page-complete message, then press Screen1Select.PageNextToken
@@ -2096,10 +2097,9 @@ function Invoke-PipelineScreen1Tick {
                 $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
 
                 if ($detected -eq 2) {
-                    # Landed on the COMPONENT LIST page, recognized by
+                    # Landed on the COMPONENT VERSION page, recognized by
                     # COMPONENT VERSION on clipboard row 0. Hand off to
-                    # Screen2.ps1 to log it and queue the
-                    # single F3 back to Screen 1.
+                    # Screen2.ps1 to log it and select its source row.
                     $global:CR_PipelineScreen1RetryCount   = 0
                     $global:CR_PipelineScreen2CapturedText = $text
                     $global:CR_PipelineState = 'EnvLog_Action'
@@ -2113,16 +2113,17 @@ function Invoke-PipelineScreen1Tick {
                         Stop-PipelineCapture
                         return
                     } else {
-                        # Enter should have opened COMPONENT LIST. Keep
+                        # Enter should have opened COMPONENT VERSION. Keep
                         # checking this same page briefly for a delayed
                         # transition; never advance to another row unless
-                        # we observed COMPONENT LIST and then F3 returned
+                        # we observed COMPONENT VERSION, selected its source,
+                        # verified source code, and F3 returned
                         # us to REPOSITORY LIST.
                         $global:CR_PipelineScreen1RetryCount++
                         $maxRetries = [int]$s1.MaxRowRetries
                         if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter for row $($global:CR_PipelineComponentIdx + 1). COMPONENT LIST did not appear; stopping without advancing." -ForegroundColor Red
-                            Show-RelayResultOverlay -Text "COMPONENT LIST NOT OPENED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter for row $($global:CR_PipelineComponentIdx + 1). COMPONENT VERSION did not appear; stopping without advancing." -ForegroundColor Red
+                            Show-RelayResultOverlay -Text "COMPONENT VERSION NOT OPENED - STOPPED" -Color ([System.Drawing.Color]::Red)
                             Stop-PipelineCapture
                             return
                         }
@@ -2134,8 +2135,8 @@ function Invoke-PipelineScreen1Tick {
                 else {
                     # Do not click again while the terminal is on a page
                     # we cannot identify. Recapture after a delay; a row
-                    # advances only through COMPONENT LIST -> F3 -> verified
-                    # REPOSITORY LIST.
+                    # advances only through COMPONENT VERSION -> source
+                    # code -> F3 -> verified REPOSITORY LIST.
                     $global:CR_PipelineScreen1RetryCount++
                     $maxRetries = [int]$s1.MaxRowRetries
                     if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
@@ -2272,27 +2273,20 @@ function Invoke-PipelineScreen1Tick {
 =====================================================================
  AutoClipCaptureSqlPipelineScreen2.ps1
 
- Screen 2 = COMPONENT LIST, the screen that appears after
- typing a selection letter (e.g. "B") into a Screen 1 row and pressing
- Enter. For the current, simplified cobol-pipeline flow this screen is
- only ever looked at, not drilled into any further (no environment
- zoom, no SQL search) - Screen1.ps1 already captured its text via
- Ctrl+C right before handing off here (see CompZoom_Copy), so this
- file's only job is:
-   1. Optionally append that captured text to
-      Screen1Select.OutputFileName (pipeline_component_versions.txt by
-      default), if Screen1Select.LogScreen2Text is true.
-   2. Queue a single F3 back to Screen 1 via the shared
-      Back_Action/Back_Wait/Back_Copy state chain in
-      AutoClipCapture.ps1, by setting $global:CR_PipelineAfterBack to
-      'CompNext_Action' (the exact state name AutoClipCapture.ps1's
-      Back_Copy checks for to know it should expect to land back on
-      Screen 1).
+ Screen 2 = COMPONENT VERSION. Log the page, find the unique PROD/UT/ET
+ marker in copied text, then use its column as a clue to select screen
+ row 8 two columns left with S and Enter. Clipboard line indices are
+ not treated as screen rows. Only after Screen 3's source-code menu is
+ verified on row 0 does the shared F3 state return to Screen 1.
 
- State (starts with "Env" so AutoClipCapture.ps1's tick switch routes
- it here):
-   EnvLog_Action - do the steps above, in a single tick (no waiting
-                   needed - the text was already captured on Screen 1).
+ States (start with "Env" so AutoClipCapture.ps1 routes them here):
+   EnvLog_Action     - log the captured COMPONENT VERSION page.
+   EnvSelect_Action  - locate the unique PROD/UT/ET marker in copied
+                       text, click two columns left on screen row 8,
+                       type S, and press Enter.
+   EnvSelect_Wait    - wait for the source-code screen to render.
+   EnvSelect_Copy    - copy and verify the source-code menu on row 0;
+                       only then queue the single F3 return.
 =====================================================================
 #>
 
@@ -2317,19 +2311,126 @@ function Invoke-PipelineScreen2Tick {
                 }
             }
 
-            $global:CR_PipelineScreen2CapturedText = $null
-
-            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Viewed, returning" ([System.Drawing.Color]::Orange)
-            $global:CR_PipelineAfterBack = 'CompNext_Action'
-            $global:CR_PipelineState     = 'Back_Action'
+            $global:CR_PipelineState = 'EnvSelect_Action'
             $global:CR_ElapsedMs         = 0
         }
 
+        'EnvSelect_Action' {
+            $componentText = [string]$global:CR_PipelineScreen2CapturedText
+            $componentLines = @($componentText -split "`r`n|`r|`n")
+            # Clipboard line positions are not screen row positions: some
+            # terminal copies omit leading blank rows or headers. Find the
+            # source marker as a column clue, but always target known screen
+            # row 8 using calibrated screen geometry.
+            $sourceCandidates = @()
+            for ($lineIndex = 0; $lineIndex -lt $componentLines.Count; $lineIndex++) {
+                $matches = [regex]::Matches($componentLines[$lineIndex], '\b(?:PROD|UT|ET)\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                foreach ($match in $matches) {
+                    $sourceCandidates += [pscustomobject]@{ Match = $match }
+                }
+            }
+            if ($sourceCandidates.Count -ne 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Expected one PROD, UT, or ET source marker in COMPONENT VERSION copied text, found $($sourceCandidates.Count). Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE ROW NOT FOUND - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $sourceMatch = $sourceCandidates[0].Match
+            $sourceCol = $sourceMatch.Index - 2
+            $sourceRow = 8
+            if ($sourceCol -lt 0 -or $sourceCol -ge [int]$s1.TerminalColumns) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Selection column two characters left of $($sourceMatch.Value) on COMPONENT VERSION row 8 is outside the terminal grid. Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $sourceRow -ColIndex $sourceCol
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION selection point is outside calibrated terminal bounds. Recalibrate; stopping before S." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION row 8, marker $($sourceMatch.Value) - about to click two columns left, type S + Enter"
+            if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
+
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $sourceRow -ColIndex $sourceCol
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION geometry changed while awaiting confirmation. Recalibrate; stopping before S." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE SELECTION OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+            Invoke-Screen1RowClick -ScreenPoint $screenPt
+            Start-Sleep -Milliseconds 20
+            [System.Windows.Forms.SendKeys]::SendWait('S{ENTER}')
+            $global:CR_PipelineScreen2CapturedText = $null
+            $global:CR_PipelineState = 'EnvSelect_Wait'
+            $global:CR_ElapsedMs = 0
+        }
+
+        'EnvSelect_Wait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'EnvSelect_Copy'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'EnvSelect_Copy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                $sourceText = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                        $sourceText = [System.Windows.Forms.Clipboard]::GetText()
+                    }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed on source-code page: $_" -ForegroundColor Yellow
+                }
+
+                $detected = Update-PipelineScreenTracking -Text $sourceText -PipelineName $pipeline.Name
+                if ($detected -eq 3) {
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE verified; returning to REPOSITORY LIST" ([System.Drawing.Color]::Orange)
+                    $global:CR_PipelineScreen1RetryCount = 0
+                    $global:CR_PipelineAfterBack = 'CompNext_Action'
+                    $global:CR_PipelineState = 'Back_Action'
+                    $global:CR_ElapsedMs = 0
+                } else {
+                    $global:CR_PipelineScreen1RetryCount++
+                    $maxRetries = [int]$s1.MaxRowRetries
+                    if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source-code page was not verified by the row-0 menu text. Stopping without F3." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "SOURCE CODE NOT VERIFIED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source-code page not yet verified (detected screen $detected); recapturing without another S or F3 ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
+                    $global:CR_PipelineState = 'EnvSelect_Wait'
+                    $global:CR_ElapsedMs = 0
+                }
+            }
+        }
+
         default {
-            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unknown Screen2 state '$($global:CR_PipelineState)' - going back to be safe." -ForegroundColor Yellow
-            $global:CR_PipelineAfterBack = 'CompNext_Action'
-            $global:CR_PipelineState     = 'Back_Action'
-            $global:CR_ElapsedMs         = 0
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unknown COMPONENT VERSION state '$($global:CR_PipelineState)' - stopping without F3." -ForegroundColor Red
+            Show-RelayResultOverlay -Text "UNKNOWN COMPONENT STATE - STOPPED" -Color ([System.Drawing.Color]::Red)
+            Stop-PipelineCapture
         }
     }
 }
@@ -2344,34 +2445,23 @@ function Invoke-PipelineScreen2Tick {
 =====================================================================
  AutoClipCaptureSqlPipelineScreen3.ps1
 
- Screen 3 = the COBOL/SQL search screen a full component -> environment
- -> SQL-search pipeline would eventually drill into. NOT IMPLEMENTED
- YET - the current cobol-pipeline flow only ever goes Screen 1 -> click
- a row -> Screen 2 -> F3 back -> next row (see
- AutoClipCaptureSqlPipelineScreen1.ps1 and ...Screen2.ps1), so no
- 'Sql_*' state should ever actually be set.
+ Screen 3 = the COBOL source-code page, recognized by the row-0 menu
+ text "Menu  Utilities  Compilers  Help". Screen 2 verifies this page
+ before queuing one F3 return to Screen 1. The deeper SQL search flow
+ is not implemented, so no 'Sql_*' state should ever be set.
 
- This file exists only so AutoClipCapture.ps1's dot-source of it at
- startup succeeds, and so that IF some future state machine change
- ever does set a 'Sql_*' state by mistake (or on purpose, once this is
- built out), the pipeline fails safely - stopping with a clear message
- - instead of the tick switch silently matching nothing and the
- automation hanging forever in an unhandled state.
+ This handler remains a safe stop for unexpected 'Sql_*' states instead
+ of letting the tick switch silently match nothing and the automation
+ hang forever in an unhandled state.
 
- When this actually gets built out, it should follow the same shape as
- the other two files: a few small states (Action -> Wait -> Copy),
- using $pipeline.Sql (already present in AutoClipCaptureConfig.json
- and already defaulted by AutoClipCapture.ps1's
- Add-PipelineLevelDefaults/MaxIterations backfill) for the actual
- found/not-found search logic - mirroring the built-in "SQL Search"
- scan Mode's Action/PostAction/PostCopy loop.
+ The unexpected-state handler does not perform SQL searching.
 =====================================================================
 #>
 
 function Invoke-PipelineScreen3Tick {
     $pipeline = $global:CR_ActivePipelineConfig
-    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Screen 3 (SQL search) isn't implemented yet - stopping to be safe." -ForegroundColor Red
-    Show-RelayResultOverlay -Text "SCREEN 3 NOT IMPLEMENTED - STOPPED" -Color ([System.Drawing.Color]::Red)
+    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unexpected source-code state '$($global:CR_PipelineState)' - stopping to be safe." -ForegroundColor Red
+    Show-RelayResultOverlay -Text "UNEXPECTED SOURCE STATE - STOPPED" -Color ([System.Drawing.Color]::Red)
     Stop-PipelineCapture
 }
 #=====================================================================
@@ -3607,9 +3697,8 @@ function Get-PipelineItemLabel {
 # captured text, independent of which state the pipeline *thinks*
 # it's in:
 #   Screen 1 (repository list) -> "REPOSITORY LIST" on clipboard row 0
-#   Screen 2 (component list)  -> "COMPONENT VERSION" on clipboard row 0
-#   Screen 3 (COBOL code)  -> neither of the above, but has both
-#                             "BROWSE" and "Menu" on the first page
+#   Screen 2 (component version) -> "COMPONENT VERSION" on clipboard row 0
+#   Screen 3 (source code)      -> "Menu  Utilities  Compilers  Help" on row 0
 # Returns 1, 2, 3, or 0 for text that matches none of them - a popup,
 # an error, a logout screen, or anything else unrecognized.
 function Get-PipelineScreenNumber {
@@ -3621,7 +3710,7 @@ function Get-PipelineScreenNumber {
     }
     if (Test-RelayTextContains -Text $firstLine -Needle 'REPOSITORY LIST') { return 1 }
     if (Test-RelayTextContains -Text $firstLine -Needle 'COMPONENT VERSION') { return 2 }
-    if ((Test-RelayTextContains -Text $Text -Needle 'BROWSE') -and (Test-RelayTextContains -Text $Text -Needle 'Menu')) {
+    if (Test-RelayTextContains -Text $firstLine -Needle 'Menu  Utilities  Compilers  Help') {
         return 3
     }
     return 0
@@ -4256,8 +4345,8 @@ $tickAction = {
                 # verify we actually landed where expected before
                 # resuming wherever the caller queued up via AfterBack.
                 # Always exactly one F3 press - never held/repeated.
-                # The Screen1 component loop returns automatically after
-                # a verified COMPONENT LIST result; other back actions
+                # The repository loop returns automatically after a
+                # verified source-code result; other back actions
                 # retain the configured step-confirm gate. F3 alone does
                 # not guarantee some screens won't
                 # still jump back further than intended (e.g. all the
