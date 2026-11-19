@@ -1141,10 +1141,10 @@ function Invoke-Screen1CalibrationTool {
    2. Scans it row by row and column by column for the largest solid
       dark rectangle - that's the terminal grid, as opposed to the
       lighter menu/toolbar/status-bar chrome around it.
-   3. Inspects copied text dimensions as a clue, then asks for the
-      emulator's actual visible grid dimensions. Clipboard text can omit
+   3. Inspects copied text dimensions as a clue, then uses this session's
+      configured grid of 80 columns x 32 rows. Clipboard text can omit
       blank rows, headers, or columns, so it is never treated as truth.
-      The detected terminal rectangle divided by those dimensions gives
+      The detected terminal rectangle divided by the configured grid gives
       CharWidthPx/CharHeightPx -
       measured from the ACTUAL terminal area only, unlike
       CalibrateScreen1AutoGuided.ps1's original approach of dividing
@@ -1155,10 +1155,9 @@ function Invoke-Screen1CalibrationTool {
       moving down the page).
    4. Works out OriginX/OriginY from that rectangle's actual top-left
       corner.
-   5. Copies the CURRENT screen (Ctrl+C) and finds the real first line
-      with "COB" printed on it - ONCE. That line/column becomes
-      FirstDataRowLineIndex/SelectionColumnIndex, saved into
-      Screen1Select permanently. The real pipeline
+   5. Copies the CURRENT screen (Ctrl+C) to verify a COB data row is
+      present. Its screen row is configured as row 6 (0-based); you enter
+      the visible selection-field column, saved into Screen1Select. The real pipeline
       (AutoClipCaptureSqlPipelineScreen1.ps1) no longer reads page
       content at all to find rows - every row on every page is now
       pure arithmetic from these saved numbers (row N = first row +
@@ -1172,8 +1171,8 @@ function Invoke-Screen1CalibrationTool {
       wrong, e.g. a non-black terminal color scheme).
 
  NOTE: make sure the terminal is showing a REPOSITORY LIST page with
- at least one visible "COB" row before running this - step 5 needs
- real COB text on screen to calibrate against, this one time.
+ at least one visible "COB" row before running this. The known first
+ data row is terminal screen row 6 (counting from 0 at the top).
 
  Run it via "StartAutoClipCapture.bat Calibrate", via the -Calibrate
  switch ("powershell -STA -File AutoClipCapture.ps1 -Calibrate"), or
@@ -1524,14 +1523,14 @@ $clipboardMinWidth = ($clipboardLines | ForEach-Object { $_.Length } | Measure-O
 $clipboardMaxWidth = ($clipboardLines | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
 Write-Host ("  Clipboard clue: {0} lines, line widths {1}-{2} characters ({3} distinct widths)." -f $clipboardLines.Count, $clipboardMinWidth, $clipboardMaxWidth, $clipboardWidths.Count) -ForegroundColor DarkCyan
 Write-Host ("  'COB' appears in clipboard line {0}, column {1}: `"{2}`"" -f $cobMatch.LineIndex, $cobMatch.ColIndex, $cobMatch.LineText.Trim()) -ForegroundColor Cyan
-Write-Host "Clipboard dimensions can omit leading blank rows, headers, or columns. Use the visible emulator grid and the matching COB row below." -ForegroundColor Yellow
-$cols = Read-Host "Enter the terminal's visible character columns (from Host On-Demand session/grid settings)"
-$rows = Read-Host "Enter the terminal's visible character rows"
-$parsedCols = 0; $parsedRows = 0
-if (-not [int]::TryParse([string]$cols, [ref]$parsedCols) -or -not [int]::TryParse([string]$rows, [ref]$parsedRows) -or $parsedCols -le 0 -or $parsedRows -le 0) {
-    Write-Host "Invalid grid dimensions. Nothing changed." -ForegroundColor Red; pause; exit 1
-}
-$cols = $parsedCols; $rows = $parsedRows
+# This Host On-Demand session is configured as 80 columns by 32 rows.
+# The first COB data row is visible screen row 6 (0-based); clipboard
+# line indices remain diagnostic only and may omit leading screen rows.
+$cols = 80
+$rows = 32
+$realLineIndex = 6
+Write-Host "Using configured terminal grid: 80 columns x 32 rows; first COB data row is screen row 6 (0-based)." -ForegroundColor Cyan
+Write-Host "Clipboard dimensions above are diagnostic only and are not used as screen coordinates." -ForegroundColor DarkGray
 $boxWidth  = $box.Right - $box.Left
 $boxHeight = $box.Bottom - $box.Top
 $CharWidthPx  = [math]::Round(($boxWidth / $cols), 2)
@@ -1539,13 +1538,11 @@ $CharHeightPx = [math]::Round(($boxHeight / $rows), 2)
 if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $CharHeightPx -gt 50) {
     Write-Host "Detected terminal is $boxWidth x $boxHeight px; these dimensions imply an implausible cell size ($CharWidthPx x $CharHeightPx px). Nothing changed." -ForegroundColor Red; pause; exit 1
 }
-$screenRow = Read-Host ("Enter the visible 0-based screen row for this first COB data row (clipboard line was {0})" -f $cobMatch.LineIndex)
 $screenCol = Read-Host "Enter the visible 0-based screen column of the selection field immediately left of COB"
-$parsedScreenRow = -1; $parsedScreenCol = -1
-if (-not [int]::TryParse([string]$screenRow, [ref]$parsedScreenRow) -or -not [int]::TryParse([string]$screenCol, [ref]$parsedScreenCol) -or $parsedScreenRow -lt 0 -or $parsedScreenRow -ge $rows -or $parsedScreenCol -lt 0 -or $parsedScreenCol -ge $cols) {
-    Write-Host "The visible COB row/column is outside the terminal grid. Nothing changed." -ForegroundColor Red; pause; exit 1
+$parsedScreenCol = -1
+if (-not [int]::TryParse([string]$screenCol, [ref]$parsedScreenCol) -or $parsedScreenCol -lt 0 -or $parsedScreenCol -ge $cols) {
+    Write-Host "The selection field column is outside the 80-column terminal grid. Nothing changed." -ForegroundColor Red; pause; exit 1
 }
-$realLineIndex = $parsedScreenRow
 $calibratedSelectionColumn = $parsedScreenCol
 $OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
 $OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
@@ -1619,7 +1616,7 @@ foreach ($prop in @(
     }
 }
 
-$calibNote = "Auto-calibrated {0} using detected terminal bounds and a visible COB row. Clipboard dimensions were diagnostic only. Recalibrate if display scaling, terminal size, font, or layout changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+$calibNote = "Auto-calibrated {0} using detected terminal bounds, an 80x32 session grid, and first COB row 6 (0-based). Clipboard dimensions were diagnostic only. Recalibrate if display scaling, terminal size, font, or layout changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote')) {
     $chosenPipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $calibNote -Force
 } else {
