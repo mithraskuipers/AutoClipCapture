@@ -105,27 +105,15 @@
                        clipboard involved. Ignored while the Toggle
                        relay or a scan mode is running.
 
-   [Pipeline hotkeys] -> Any number of multi-screen "Pipelines" can be
-                       defined, each bound to its own hotkey, for
-                       walking a full Screen1 (components) -> Screen2
-                       (environments) -> Screen3 (SQL search) tree
-                       instead of a single-screen scan Mode. For each
-                       component: try to zoom in (Component.ZoomActionToken);
-                       if the resulting screen still contains
-                       Component.UnavailableText, that component is
-                       skipped (Component.NextActionToken moves to the
-                       next one). Otherwise every environment is walked
-                       the same way (Environment.ZoomActionToken /
-                       Environment.UnavailableText / Environment.NextActionToken),
-                       and once an environment is available the existing
-                       SQL Search logic (the Sql block - same fields as
-                       a scan Mode) always runs. Results are recorded
-                       per (component, environment) pair in
-                       pipeline_sql_check.md. Going back a screen is
-                       always a single F3 press (never held/repeated),
-                       so a screen that treats repeated F3 as "back
-                       multiple screens" (e.g. out to a logout screen)
-                       stays safe. Pipelines are configured in
+   [Pipeline hotkeys] -> A pipeline walks the COB rows on REPOSITORY
+                       LIST. For each row it selects B, enters
+                       COMPONENT VERSION, selects S beside PROD/UT/ET
+                       only when S is not already present, and opens
+                       SOURCE CODE. It then runs Auto Capture Current
+                       File through the source pages. After duplicate
+                       page detection marks the end, it sends one F3,
+                       verifies the repository page, and continues with
+                       the next COB row. Pipelines are configured in
                        AutoClipCaptureConfig.json (see the Pipelines
                        array) - like Modes, they aren't edited from the
                        config GUI.
@@ -1741,7 +1729,8 @@ public static class CR_DpiAwareness {
    3. Confirm COMPONENT VERSION, find its PROD/UT/ET source row in
       copied text, then select calibrated screen row 8 two columns to
       the left with S and Enter. Confirm the source-code menu on row 0,
-      then press F3 and verify REPOSITORY LIST returned.
+      run Auto Capture Current File through the end of source, then
+      press F3 and verify REPOSITORY LIST returned.
    4. Only after that verified return, continue to the next COB row.
    5. When the last COB row on the page is processed, show a centered
       page-complete message, then press Screen1Select.PageNextToken
@@ -2315,7 +2304,7 @@ function Invoke-PipelineScreen1Tick {
    EnvSelect_EnterWait - wait and press Enter, with or without typing S.
    EnvSelect_Wait    - wait for the source-code screen to render.
    EnvSelect_Copy    - copy and verify the source-code menu on row 0;
-                       only then queue the single F3 return.
+                       only then start Auto Capture Current File.
 =====================================================================
 #>
 
@@ -2493,10 +2482,9 @@ function Invoke-PipelineScreen2Tick {
 
                 $detected = Update-PipelineScreenTracking -Text $sourceText -PipelineName $pipeline.Name
                 if ($detected -eq 3) {
-                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE verified; returning to REPOSITORY LIST" ([System.Drawing.Color]::Orange)
-                    $global:CR_PipelineScreen1RetryCount = 0
-                    $global:CR_PipelineAfterBack = 'CompNext_Action'
-                    $global:CR_PipelineState = 'Back_Action'
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE verified; starting Auto Capture Current File" ([System.Drawing.Color]::Orange)
+                    $global:CR_PipelineSourceCaptureText = $sourceText
+                    $global:CR_PipelineState = 'SrcCapture_Start'
                     $global:CR_ElapsedMs = 0
                 } else {
                     $global:CR_PipelineScreen1RetryCount++
@@ -2533,23 +2521,183 @@ function Invoke-PipelineScreen2Tick {
  AutoClipCaptureSqlPipelineScreen3.ps1
 
  Screen 3 = the COBOL source-code page, recognized by the row-0 menu
- text "Menu  Utilities  Compilers  Help". Screen 2 verifies this page
- before queuing one F3 return to Screen 1. The deeper SQL search flow
- is not implemented, so no 'Sql_*' state should ever be set.
-
- This handler remains a safe stop for unexpected 'Sql_*' states instead
- of letting the tick switch silently match nothing and the automation
- hang forever in an unhandled state.
-
- The unexpected-state handler does not perform SQL searching.
+ text "Menu  Utilities  Compilers  Help". Once verified, run the same
+ capture loop as Auto Capture Current File: append filtered screens to
+ the component's .txt/.cbl files, send the configured action key (F8 by
+ default), and stop when the captured screen repeats. Only then queue
+ the single F3 return to Screen 1. Unexpected Sql_* states fail safely.
 =====================================================================
 #>
 
 function Invoke-PipelineScreen3Tick {
     $pipeline = $global:CR_ActivePipelineConfig
-    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unexpected source-code state '$($global:CR_PipelineState)' - stopping to be safe." -ForegroundColor Red
-    Show-RelayResultOverlay -Text "UNEXPECTED SOURCE STATE - STOPPED" -Color ([System.Drawing.Color]::Red)
-    Stop-PipelineCapture
+    switch ($global:CR_PipelineState) {
+        'SrcCapture_Start' {
+            $sourceText = [string]$global:CR_PipelineSourceCaptureText
+            $baseName = Get-ComponentIdFromText -Text $sourceText
+            if ([string]::IsNullOrWhiteSpace($baseName)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] SOURCE CODE is verified, but no BROWSE component identifier was found for Auto Capture Current File. Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE FILE NAME NOT FOUND - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $baseName = Get-SafeFileName $baseName
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($baseName)
+            if ([string]::IsNullOrWhiteSpace($baseName)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not make a safe output filename for the source file. Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE FILE NAME INVALID - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            foreach ($dir in @($TxtDir, $CblDir)) {
+                if (-not (Test-Path -Path $dir)) {
+                    try { New-Item -ItemType Directory -Path $dir -Force | Out-Null } catch {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not create capture folder '$dir': $_" -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "CAPTURE FOLDER ERROR - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                }
+            }
+
+            $global:CR_PipelineSourceLogFile = Join-Path $TxtDir ($baseName + '.txt')
+            $global:CR_PipelineSourceLogFileCbl = Join-Path $CblDir ($baseName + '.cbl')
+            $global:CR_PipelineSourceCapturePreviousText = $null
+            $global:CR_PipelineSourceCapturePages = 0
+            $global:CR_PipelineSourceCaptureRetries = 0
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File started for $baseName; output: $($global:CR_PipelineSourceLogFile) and $($global:CR_PipelineSourceLogFileCbl)" -ForegroundColor Green
+            $global:CR_PipelineState = 'SrcCapture_Save'
+            $global:CR_ElapsedMs = 0
+        }
+
+        'SrcCapture_Save' {
+            $text = [string]$global:CR_PipelineSourceCaptureText
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source capture returned empty text. Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE CAPTURE EMPTY - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            # The Auto Capture Current File loop ends when paging no
+            # longer produces new text. Don't append the repeated final
+            # screen; treat it as end-of-file and only then return with F3.
+            if ($null -ne $global:CR_PipelineSourceCapturePreviousText) {
+                $similarity = Get-TextSimilarity -A $global:CR_PipelineSourceCapturePreviousText -B $text
+                if ($similarity -ge $DupDetectThreshold) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File complete after $($global:CR_PipelineSourceCapturePages) page(s); the next F8 screen repeated the previous page." -ForegroundColor Green
+                    Show-RelayResultOverlay -Text "SOURCE CAPTURE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
+                    $global:CR_PipelineScreen1RetryCount = 0
+                    $global:CR_PipelineAfterBack = 'CompNext_Action'
+                    $global:CR_PipelineState = 'Back_Action'
+                    $global:CR_ElapsedMs = 0
+                    return
+                }
+            }
+
+            if ($global:CR_PipelineSourceCapturePages -ge 10000) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File reached the 10000-page safety limit. Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE CAPTURE PAGE LIMIT - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $filtered = Get-FilteredCaptureText -Text $text -SkipStart $SkipRowsStart -SkipEnd $SkipRowsEnd
+            try {
+                if (-not [string]::IsNullOrEmpty($filtered)) {
+                    Add-Content -Path $global:CR_PipelineSourceLogFile -Value $filtered
+                    Add-Content -Path $global:CR_PipelineSourceLogFileCbl -Value $filtered
+                }
+            } catch {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Failed to save Auto Capture Current File output: $_. Stopping before F3." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "SOURCE CAPTURE SAVE FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+
+            $global:CR_PipelineSourceCapturePreviousText = $text
+            $global:CR_PipelineSourceCapturePages++
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Saved source page $($global:CR_PipelineSourceCapturePages)." -ForegroundColor DarkCyan
+            $global:CR_PipelineState = 'SrcCapture_Action'
+            $global:CR_ElapsedMs = 0
+        }
+
+        'SrcCapture_Action' {
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone during source capture. Stopping." -ForegroundColor Red
+                Stop-PipelineCapture
+                return
+            }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Auto Capture Current File - sending $ActionKeyDisplay" ([System.Drawing.Color]::Orange)
+            [System.Windows.Forms.SendKeys]::SendWait($ActionKeyToken)
+            $global:CR_PipelineState = 'SrcCapture_Wait'
+            $global:CR_ElapsedMs = 0
+        }
+
+        'SrcCapture_Wait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone during source capture. Stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'SrcCapture_Copy'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'SrcCapture_Copy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                        $text = [System.Windows.Forms.Clipboard]::GetText()
+                    }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed during source capture: $_" -ForegroundColor Yellow
+                }
+
+                if ([string]::IsNullOrWhiteSpace($text)) {
+                    $global:CR_PipelineSourceCaptureRetries++
+                    if ($global:CR_PipelineSourceCaptureRetries -gt [int]$pipeline.Screen1Select.MaxRowRetries) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not read source text after $($global:CR_PipelineSourceCaptureRetries) attempts. Stopping before F3." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "SOURCE CAPTURE READ FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Source clipboard was empty; retrying Ctrl+C ($($global:CR_PipelineSourceCaptureRetries))." -ForegroundColor Yellow
+                    $global:CR_PipelineState = 'SrcCapture_Wait'
+                    $global:CR_ElapsedMs = 0
+                    return
+                }
+
+                $sourceScreen = Get-PipelineScreenNumber -Text $text
+                if ($sourceScreen -ne 3) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File left the verified SOURCE CODE page (detected screen $sourceScreen). Stopping before F3." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "SOURCE PAGE CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                $global:CR_PipelineSourceCaptureRetries = 0
+                $global:CR_PipelineSourceCaptureText = $text
+                $global:CR_PipelineState = 'SrcCapture_Save'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        default {
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Unexpected source-code state '$($global:CR_PipelineState)' - stopping to be safe." -ForegroundColor Red
+            Show-RelayResultOverlay -Text "UNEXPECTED SOURCE STATE - STOPPED" -Color ([System.Drawing.Color]::Red)
+            Stop-PipelineCapture
+        }
+    }
 }
 #=====================================================================
 # endregion: AutoClipCaptureSqlPipelineScreen3.ps1
@@ -4204,6 +4352,13 @@ function Stop-PipelineCapture {
     $global:CR_PipelineScreen1RetryCount   = 0
     $global:CR_PipelineScreen1Rows          = @()
     $global:CR_PipelineScreen2CapturedText = $null
+    $global:CR_PipelineSourceSelectionSent = $false
+    $global:CR_PipelineSourceCaptureText = $null
+    $global:CR_PipelineSourceCapturePreviousText = $null
+    $global:CR_PipelineSourceLogFile = $null
+    $global:CR_PipelineSourceLogFileCbl = $null
+    $global:CR_PipelineSourceCapturePages = 0
+    $global:CR_PipelineSourceCaptureRetries = 0
     $global:CR_TargetHandle          = [IntPtr]::Zero
     $global:CR_PipelineStepPending     = $false
     $global:CR_PipelineStepConfirmed   = $false
@@ -4400,6 +4555,12 @@ $global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized scree
 $global:CR_PipelineScreen1Rows         = @()   # row slots through last COB: @{ LineIndex; ColIndex; HasCob }
 $global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
 $global:CR_PipelineSourceSelectionSent = $false # enforce at most one S per COMPONENT VERSION page
+$global:CR_PipelineSourceCaptureText = $null
+$global:CR_PipelineSourceCapturePreviousText = $null
+$global:CR_PipelineSourceLogFile = $null
+$global:CR_PipelineSourceLogFileCbl = $null
+$global:CR_PipelineSourceCapturePages = 0
+$global:CR_PipelineSourceCaptureRetries = 0
 
 # ---- Step-confirm gate state (see Request-PipelineStepConfirm) ----
 $global:CR_PipelineStepPending     = $false   # true while a queued input is waiting on Right Arrow
@@ -4414,10 +4575,10 @@ $tickAction = {
     if ($null -eq $global:CR_ActiveAutomation) { return }
 
     if ($null -ne $global:CR_ActivePipelineConfig) {
-        # ---- A Pipeline is running (component -> environment -> SQL
-        # search, screen by screen); the classic Relay and single-level
-        # scan Mode state machines below are both skipped entirely while
-        # this is the case. Each screen's own logic lives in its own
+        # ---- A Pipeline is running (repository -> component version ->
+        # source capture, screen by screen); the classic Relay and
+        # single-level scan Mode state machines below are both skipped
+        # entirely while this is the case. Each screen's own logic lives in its own
         # file (AutoClipCaptureSqlPipelineScreen1/2/3.ps1, dot-sourced
         # near the top of this script) - this just routes the current
         # sub-state to the right one. Only the shared "go back a
@@ -4430,14 +4591,15 @@ $tickAction = {
                 'List*' { Invoke-PipelineListTick }
                 'Comp*' { Invoke-PipelineScreen1Tick }
                 'Env*'  { Invoke-PipelineScreen2Tick }
+                'Src*'  { Invoke-PipelineScreen3Tick }
                 'Sql_*' { Invoke-PipelineScreen3Tick }
 
                 # ---- Single F3 press back to the previous screen, then
                 # verify we actually landed where expected before
                 # resuming wherever the caller queued up via AfterBack.
                 # Always exactly one F3 press - never held/repeated.
-                # The repository loop returns automatically after a
-                # verified source-code result; other back actions
+                # The repository loop returns automatically after source
+                # capture completes; other back actions
                 # retain the configured step-confirm gate. F3 alone does
                 # not guarantee some screens won't
                 # still jump back further than intended (e.g. all the
@@ -4504,11 +4666,19 @@ $tickAction = {
             }
         } catch {
             Write-Host "[AutoClipCapture] [$($global:CR_ActivePipelineConfig.Name)] Tick error (recovered): $($_.Exception.Message)" -ForegroundColor Yellow
-            # Re-scan rather than resume CompZoom_Action directly - the
-            # error could have hit mid-scan, leaving
-            # $global:CR_PipelineScreen1Rows stale or empty.
-            $global:CR_PipelineState = 'CompScan_Action'
-            $global:CR_ElapsedMs = 0
+            if ([string]$global:CR_PipelineState -like 'Src*') {
+                # A source-capture error must never fall through to
+                # repository row selection while the terminal is still
+                # on the source screen.
+                Show-RelayResultOverlay -Text "SOURCE CAPTURE ERROR - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+            } else {
+                # Re-scan rather than resume CompZoom_Action directly -
+                # the error could have hit mid-scan, leaving the row list
+                # stale or empty.
+                $global:CR_PipelineState = 'CompScan_Action'
+                $global:CR_ElapsedMs = 0
+            }
         }
         return
     }
