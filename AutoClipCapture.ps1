@@ -2128,6 +2128,7 @@ function Invoke-PipelineScreen1Tick {
                     # Screen2.ps1 to log it and select its source row.
                     $global:CR_PipelineScreen1RetryCount   = 0
                     $global:CR_PipelineScreen2CapturedText = $text
+                    $global:CR_PipelineSourceSelectionSent = $false
                     $global:CR_PipelineState = 'EnvLog_Action'
                     $global:CR_ElapsedMs     = 0
                 }
@@ -2409,7 +2410,15 @@ function Invoke-PipelineScreen2Tick {
                     Stop-PipelineCapture
                     return
                 }
-                [System.Windows.Forms.SendKeys]::SendWait('S')
+                if (-not $global:CR_PipelineSourceSelectionSent) {
+                    # Mark before dispatch so a recovered/re-entered state
+                    # can never type a second S on this COMPONENT VERSION.
+                    $global:CR_PipelineSourceSelectionSent = $true
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Sending the single S selection for this COMPONENT VERSION page." -ForegroundColor DarkGray
+                    [System.Windows.Forms.SendKeys]::SendWait('S')
+                } else {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] S was already sent for this COMPONENT VERSION page; skipping duplicate input." -ForegroundColor Yellow
+                }
                 $global:CR_PipelineState = 'EnvSelect_EnterWait'
                 $global:CR_ElapsedMs = 0
             }
@@ -4364,6 +4373,7 @@ $global:CR_PipelineScreen1PrevPageText = $null # previous page's raw capture, fo
 $global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen"/"no rows found" retries
 $global:CR_PipelineScreen1Rows         = @()   # row slots through last COB: @{ LineIndex; ColIndex; HasCob }
 $global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
+$global:CR_PipelineSourceSelectionSent = $false # enforce at most one S per COMPONENT VERSION page
 
 # ---- Step-confirm gate state (see Request-PipelineStepConfirm) ----
 $global:CR_PipelineStepPending     = $false   # true while a queued input is waiting on Right Arrow
