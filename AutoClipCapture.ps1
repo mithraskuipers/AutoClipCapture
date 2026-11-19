@@ -1156,8 +1156,8 @@ function Invoke-Screen1CalibrationTool {
    4. Works out OriginX/OriginY from that rectangle's actual top-left
       corner.
    5. Copies the CURRENT screen (Ctrl+C) to verify a COB data row is
-      present. Its screen row is configured as row 6 (0-based); you enter
-      the visible selection-field column, saved into Screen1Select. The real pipeline
+      present. Its screen row is configured as row 6 (0-based), and the
+      selection field is configured as columns 1-2 (0-based). The real pipeline
       (AutoClipCaptureSqlPipelineScreen1.ps1) no longer reads page
       content at all to find rows - every row on every page is now
       pure arithmetic from these saved numbers (row N = first row +
@@ -1529,7 +1529,10 @@ Write-Host ("  'COB' appears in clipboard line {0}, column {1}: `"{2}`"" -f $cob
 $cols = 80
 $rows = 32
 $realLineIndex = 6
+$calibratedSelectionColumn = 1
+$selectionFieldLastColumn = 2
 Write-Host "Using configured terminal grid: 80 columns x 32 rows; first COB data row is screen row 6 (0-based)." -ForegroundColor Cyan
+Write-Host "Using selection field columns 1-2 (0-based); click target is column 1." -ForegroundColor Cyan
 Write-Host "Clipboard dimensions above are diagnostic only and are not used as screen coordinates." -ForegroundColor DarkGray
 $boxWidth  = $box.Right - $box.Left
 $boxHeight = $box.Bottom - $box.Top
@@ -1538,18 +1541,12 @@ $CharHeightPx = [math]::Round(($boxHeight / $rows), 2)
 if ($CharWidthPx -lt 4 -or $CharWidthPx -gt 30 -or $CharHeightPx -lt 6 -or $CharHeightPx -gt 50) {
     Write-Host "Detected terminal is $boxWidth x $boxHeight px; these dimensions imply an implausible cell size ($CharWidthPx x $CharHeightPx px). Nothing changed." -ForegroundColor Red; pause; exit 1
 }
-$screenCol = Read-Host "Enter the visible 0-based screen column of the selection field immediately left of COB"
-$parsedScreenCol = -1
-if (-not [int]::TryParse([string]$screenCol, [ref]$parsedScreenCol) -or $parsedScreenCol -lt 0 -or $parsedScreenCol -ge $cols) {
-    Write-Host "The selection field column is outside the 80-column terminal grid. Nothing changed." -ForegroundColor Red; pause; exit 1
-}
-$calibratedSelectionColumn = $parsedScreenCol
 $OriginX = [math]::Round($box.Left + ($CharWidthPx / 2))
 $OriginY = [math]::Round($box.Top + ($CharHeightPx / 2))
 Write-Host ("  Terminal box = {0}x{1} px at ({2},{3}); grid = {4} columns x {5} rows; cell = {6}x{7} px" -f $boxWidth,$boxHeight,$box.Left,$box.Top,$cols,$rows,$CharWidthPx,$CharHeightPx) -ForegroundColor Cyan
 
 $targetColIndex = $calibratedSelectionColumn + $clickColumnOffset
-if ($targetColIndex -lt 0 -or $targetColIndex -ge $cols) { Write-Host "Selection field would be outside terminal columns. Nothing changed." -ForegroundColor Red; pause; exit 1 }
+if ($targetColIndex -lt 0 -or $targetColIndex -ge $cols -or $selectionFieldLastColumn -ge $cols) { Write-Host "Selection field would be outside terminal columns. Nothing changed." -ForegroundColor Red; pause; exit 1 }
 $confirmX = $OriginX + ($targetColIndex * $CharWidthPx)
 $confirmY = $OriginY + ($realLineIndex * $CharHeightPx)
 
@@ -1563,7 +1560,7 @@ if ($confirmX -lt ($box.Left + 0.5) -or $confirmX -ge ($box.Right - 0.5) -or $co
 [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($pt.X, $pt.Y)
 
 Write-Host ""
-Write-Host "Pointer moved to the selection field on the known first COB data row." -ForegroundColor Cyan
+Write-Host "Pointer moved to column 1 inside the two-column selection field (columns 1-2) on the known first COB data row." -ForegroundColor Cyan
 Write-Host "Look at the terminal - does it land there? ENTER to save, Esc to cancel." -ForegroundColor Cyan
 Write-Host "(Reminder: this assumes 100% display scaling and today's font/window size." -ForegroundColor DarkGray
 Write-Host " Recalibrate if either changes later.)" -ForegroundColor DarkGray
@@ -1616,7 +1613,7 @@ foreach ($prop in @(
     }
 }
 
-$calibNote = "Auto-calibrated {0} using detected terminal bounds, an 80x32 session grid, and first COB row 6 (0-based). Clipboard dimensions were diagnostic only. Recalibrate if display scaling, terminal size, font, or layout changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+$calibNote = "Auto-calibrated {0} using detected terminal bounds, an 80x32 session grid, first COB row 6 (0-based), and selection field columns 1-2. Clipboard dimensions were diagnostic only. Recalibrate if display scaling, terminal size, font, or layout changes." -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 if (-not ($chosenPipeline.Screen1Select.PSObject.Properties.Name -contains 'CalibrationNote')) {
     $chosenPipeline.Screen1Select | Add-Member -NotePropertyName CalibrationNote -NotePropertyValue $calibNote -Force
 } else {
