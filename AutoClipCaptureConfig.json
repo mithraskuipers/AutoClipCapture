@@ -150,7 +150,7 @@
         "ComponentVersion":  {
             "BeforeClickMs":  0,
             "AfterClickMs":  1000,
-            "AfterSelectionLetterMs":  1000,
+            "PauseAfterSBeforeEnterMs":  500,
             "AfterEnterMs":  1000,
             "AfterClipboardCopyMs":  1000,
             "AfterF3Ms":  1000

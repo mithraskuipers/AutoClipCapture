@@ -266,7 +266,7 @@ function Get-DefaultPipelineTimingsMs {
         ComponentVersion = [pscustomobject]@{
             BeforeClickMs = 0
             AfterClickMs = 1000
-            AfterSelectionLetterMs = 1000
+            PauseAfterSBeforeEnterMs = 500
             AfterEnterMs = 1000
             AfterClipboardCopyMs = 1000
             AfterF3Ms = 1000
@@ -2443,11 +2443,19 @@ function Invoke-PipelineScreen1Tick {
                 # anchors at the calibrated screen row on every page.
                 $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
                 $global:CR_PipelineScreen1PrevPageText = $text
+                $nextPageRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
+                $cobCount = @($nextPageRows | Where-Object { $_.HasCob }).Count
                 $global:CR_PipelineScreen1PageIdx++
-                $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
+                if ($cobCount -eq 0) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST page $($global:CR_PipelineScreen1PageIdx + 1) has no COB rows. All COB rows have been processed." -ForegroundColor Green
+                    Show-RelayResultOverlay -Text "ALL COB ROWS PROCESSED" -Color ([System.Drawing.Color]::LimeGreen)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                $global:CR_PipelineScreen1Rows = $nextPageRows
                 $global:CR_PipelineComponentIdx  = 0
                 $global:CR_PipelineFailureRowLogged = $false
-                $cobCount = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob }).Count
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Repository page $($global:CR_PipelineScreen1PageIdx + 1): found $cobCount COB row(s) across $($global:CR_PipelineScreen1Rows.Count) row slot(s) through the last COB." -ForegroundColor DarkCyan
                 $global:CR_PipelineState = if ($global:CR_PipelineScreen1Rows.Count -gt 0) { 'CompZoom_Action' } else { 'CompNext_Action' }
                 $global:CR_ElapsedMs     = 0
@@ -2634,7 +2642,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_EnterWait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.AfterSelectionLetterMs) {
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.ComponentVersion.PauseAfterSBeforeEnterMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before pressing Enter on COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
                     return
