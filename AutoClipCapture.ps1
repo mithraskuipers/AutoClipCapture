@@ -3481,6 +3481,37 @@ function Get-ComponentIdFromText {
     return $null
 }
 
+# Used by "Auto capture current file" to name its output automatically.
+# Brings the target window to the front, copies its current screen
+# (Ctrl+C), and returns the component identifier from the "BROWSE (...)"
+# line (e.g. "CF205"), or $null if the clipboard has no such line.
+# The clipboard is cleared first so stale text from an earlier copy can
+# never be mistaken for this screen.
+function Get-AutoCaptureBaseName {
+    param([IntPtr]$Handle)
+
+    if (-not (Set-RelayForeground -Handle $Handle)) { return $null }
+
+    try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
+    [System.Windows.Forms.SendKeys]::SendWait('^c')
+
+    $text = $null
+    $waited = 0
+    $maxWait = [Math]::Max($CopyDelayMs * 4, 1000)
+    while ($waited -lt $maxWait) {
+        Start-Sleep -Milliseconds $CopyDelayMs
+        $waited += $CopyDelayMs
+        try {
+            if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+                $candidate = [System.Windows.Forms.Clipboard]::GetText()
+                if (-not [string]::IsNullOrWhiteSpace($candidate)) { $text = $candidate; break }
+            }
+        } catch {}
+    }
+
+    return (Get-ComponentIdFromText -Text $text)
+}
+
 # Generic version of the above used by Pipelines: searches the whole
 # captured text (not just a "BROWSE" line) for the first match of a
 # configurable regex Pattern, and falls back to a positional label
@@ -4471,15 +4502,23 @@ $hotkeyAction = {
             #    supplies the base name - the actual output is always
             #    two files: <base>.txt in ..\txt and <base>.cbl in
             #    ..\cbl (the folders just outside the script's folder).
-            $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
-            if ($null -eq $name) {
-                Write-Host "[AutoClipCapture] Capture start cancelled." -ForegroundColor Yellow
+            #    UPDATE: there is no filename prompt anymore. The base
+            #    name is inferred automatically from the first screen
+            #    of the target window: Ctrl+C it, find the line that
+            #    starts with "BROWSE", and take what's inside the
+            #    parentheses on that line - e.g. "BROWSE (CF205) ..."
+            #    gives the base name CF205.
+            $name = Get-AutoCaptureBaseName -Handle $target.Handle
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                Write-Host "[AutoClipCapture] Capture start cancelled - no 'BROWSE (...)' line found on the first screen, so no filename could be inferred. Open the source code screen and try again." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "NO FILENAME FOUND" -Color ([System.Drawing.Color]::OrangeRed)
                 Hide-RelayStatus
                 return
             }
             $safeName = Get-SafeFileName $name
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($safeName)
-            if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = $DefaultBaseName }
+            if ([string]::IsNullOrWhiteSpace($baseName)) { $baseName = $safeName }
+            Write-Host "[AutoClipCapture] Filename inferred from screen: $baseName" -ForegroundColor Cyan
 
             foreach ($d in @($TxtDir, $CblDir)) {
                 if (-not (Test-Path -Path $d)) {
