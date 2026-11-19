@@ -1,8 +1,8 @@
 ﻿{
     "LogFile":  "CapturedOutput.txt",
-    "CopyDelayMs":  300,
-    "AfterActionKeyDelayMs":  300,
-    "TimerTickMs":  50,
+    "CopyDelayMs":  250,
+    "AfterActionKeyDelayMs":  250,
+    "TimerTickMs":  250,
     "SkipRowsStart":  3,
     "SkipRowsEnd":  3,
     "ActionKeyDisplay":  "F8",
@@ -137,32 +137,32 @@
                   ],
     "PipelineTimingsMs":  {
         "RepositoryList":  {
-            "BeforeClickMs":  300,
-            "AfterClickMs":  300,
-            "AfterSelectionLetterMs":  300,
-            "AfterEnterMs":  300,
-            "AfterClipboardCopyMs":  300,
-            "InitialScanAfterClipboardCopyMs":  300,
-            "AfterPageKeyMs":  300,
-            "AfterDeleteMs":  300,
-            "AfterF3Ms":  300
+            "BeforeClickMs":  0,
+            "AfterClickMs":  1000,
+            "AfterSelectionLetterMs":  1000,
+            "AfterEnterMs":  1000,
+            "AfterClipboardCopyMs":  1000,
+            "InitialScanAfterClipboardCopyMs":  250,
+            "AfterPageKeyMs":  1000,
+            "AfterDeleteMs":  1000,
+            "AfterF3Ms":  1000
         },
         "ComponentVersion":  {
-            "BeforeClickMs":  300,
-            "AfterClickMs":  300,
-            "PauseAfterSBeforeEnterMs":  300,
-            "AfterEnterMs":  300,
-            "AfterClipboardCopyMs":  300,
-            "AfterF3Ms":  300
+            "BeforeClickMs":  0,
+            "AfterClickMs":  1000,
+            "PauseAfterSBeforeEnterMs":  500,
+            "AfterEnterMs":  1000,
+            "AfterClipboardCopyMs":  1000,
+            "AfterF3Ms":  1000
         },
         "SourceCode":  {
-            "AfterActionKeyMs":  300,
-            "AfterClipboardCopyMs":  300,
-            "AfterF3Ms":  300
+            "AfterActionKeyMs":  250,
+            "AfterClipboardCopyMs":  250,
+            "AfterF3Ms":  1000
         },
         "ComponentList":  {
-            "AfterPageKeyMs":  300,
-            "AfterClipboardCopyMs":  300
+            "AfterPageKeyMs":  250,
+            "AfterClipboardCopyMs":  250
         }
     }
 }

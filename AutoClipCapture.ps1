@@ -253,32 +253,32 @@ $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 function Get-DefaultPipelineTimingsMs {
     [pscustomobject]@{
         RepositoryList = [pscustomobject]@{
-            BeforeClickMs = 300
-            AfterClickMs = 300
-            AfterSelectionLetterMs = 300
-            AfterEnterMs = 300
-            AfterClipboardCopyMs = 300
-            InitialScanAfterClipboardCopyMs = 300
-            AfterPageKeyMs = 300
-            AfterDeleteMs = 300
-            AfterF3Ms = 300
+            BeforeClickMs = 0
+            AfterClickMs = 1000
+            AfterSelectionLetterMs = 1000
+            AfterEnterMs = 1000
+            AfterClipboardCopyMs = 1000
+            InitialScanAfterClipboardCopyMs = 250
+            AfterPageKeyMs = 1000
+            AfterDeleteMs = 1000
+            AfterF3Ms = 1000
         }
         ComponentVersion = [pscustomobject]@{
-            BeforeClickMs = 300
-            AfterClickMs = 300
-            PauseAfterSBeforeEnterMs = 300
-            AfterEnterMs = 300
-            AfterClipboardCopyMs = 300
-            AfterF3Ms = 300
+            BeforeClickMs = 0
+            AfterClickMs = 1000
+            PauseAfterSBeforeEnterMs = 500
+            AfterEnterMs = 1000
+            AfterClipboardCopyMs = 1000
+            AfterF3Ms = 1000
         }
         SourceCode = [pscustomobject]@{
-            AfterActionKeyMs = 300
-            AfterClipboardCopyMs = 300
-            AfterF3Ms = 300
+            AfterActionKeyMs = 250
+            AfterClipboardCopyMs = 250
+            AfterF3Ms = 1000
         }
         ComponentList = [pscustomobject]@{
-            AfterPageKeyMs = 300
-            AfterClipboardCopyMs = 300
+            AfterPageKeyMs = 250
+            AfterClipboardCopyMs = 250
         }
     }
 }
@@ -359,8 +359,8 @@ function Get-DefaultSqlSearchMode {
 function Get-DefaultConfig {
     [pscustomobject]@{
         LogFile                 = "CapturedOutput.txt"
-        CopyDelayMs             = 300
-        AfterActionKeyDelayMs   = 300
+        CopyDelayMs             = 150
+        AfterActionKeyDelayMs   = 150
         TimerTickMs             = 50
         SkipRowsStart           = 0
         SkipRowsEnd             = 0
@@ -2112,24 +2112,6 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_ElapsedMs = 0
                 return
             }
-
-            # A prior interrupted/failed run can leave B in this row's
-            # selection field. Reuse a single B rather than appending one;
-            # remove extra B characters before Enter when needed.
-            $existingBCount = 0
-            $cobMatch = [regex]::Match([string]$row.LineText, '\bCOB\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            if ($cobMatch.Success) {
-                $selectionPrefix = ([string]$row.LineText).Substring(0, $cobMatch.Index)
-                $existingBCount = [regex]::Matches($selectionPrefix, 'B', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count
-            }
-            $global:CR_PipelineExistingBCount = $existingBCount
-            $global:CR_PipelineBSelectionSent = ($existingBCount -gt 0)
-            if ($existingBCount -eq 1) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1) already has one B in its selection field; will press Enter without typing another B." -ForegroundColor DarkCyan
-            } elseif ($existingBCount -gt 1) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($rowIdx + 1) already has $existingBCount B characters; will delete $($existingBCount - 1) extra character(s) before Enter." -ForegroundColor Yellow
-            }
-
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
             if ($null -eq $pt) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Calibrated terminal bounds no longer match the target point or window size. Recalibrate after terminal resize/font changes; stopping before click." -ForegroundColor Red
@@ -2153,8 +2135,7 @@ function Invoke-PipelineScreen1Tick {
             # Shown BEFORE anything is clicked - the red circle marker
             # lands on $screenPt so a wrong target is obvious right
             # away, without a single click having happened yet.
-            $inputDescription = if ($existingBCount -eq 1) { 'click the existing B and press Enter' } elseif ($existingBCount -gt 1) { "click here, remove $($existingBCount - 1) extra B character(s), then press Enter" } else { "click here, type '$($s1.SelectionText)' + Enter" }
-            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to $inputDescription"
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - about to click here, type '$($s1.SelectionText)' + Enter"
             if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
 
             if ([int]$PipelineTimingsMs.RepositoryList.BeforeClickMs -gt 0) {
@@ -2191,7 +2172,7 @@ function Invoke-PipelineScreen1Tick {
             # Don't send HOME/DEL here. On this Host On-Demand screen,
             # HOME can focus the Show Deleted field, and DEL would erase
             # its N value. Click first, then give each key a separate
-            # configured-delay stage so the terminal cannot merge input.
+            # one-second stage so the terminal cannot merge/repeat input.
             Invoke-Screen1RowClick -ScreenPoint $screenPt
             $global:CR_PipelineState = 'CompZoom_Type'
             $global:CR_ElapsedMs     = 0
@@ -2204,24 +2185,7 @@ function Invoke-PipelineScreen1Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before typing B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
                     return
                 }
-                if ($global:CR_PipelineExistingBCount -gt 1) {
-                    # A double B can remain after an interrupted earlier
-                    # run. Remove extras in this existing wait state, then
-                    # continue with the single B already in the field.
-                    $extraBCount = [int]$global:CR_PipelineExistingBCount - 1
-                    for ($extraB = 0; $extraB -lt $extraBCount; $extraB++) {
-                        [System.Windows.Forms.SendKeys]::SendWait('{DELETE}')
-                    }
-                    $global:CR_PipelineBSelectionSent = $true
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Removed $extraBCount extra B character(s); retaining one for this row." -ForegroundColor DarkCyan
-                } elseif (-not $global:CR_PipelineBSelectionSent) {
-                    # Set the guard before dispatch. If a tick is re-entered
-                    # while SendWait pumps messages, it cannot type B twice.
-                    $global:CR_PipelineBSelectionSent = $true
-                    [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
-                } else {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] B is already present for this row; skipping duplicate input." -ForegroundColor Yellow
-                }
+                [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
                 $global:CR_PipelineState = 'CompZoom_Enter'
                 $global:CR_ElapsedMs = 0
             }
@@ -2762,9 +2726,8 @@ function Invoke-PipelineScreen2Tick {
 
  Screen 3 = the COBOL source-code page, recognized by the row-0 menu
  text "Menu  Utilities  Compilers  Help". Once verified, run the same
- capture loop as Auto Capture Current File: replace any earlier
- component .txt/.cbl files, then append filtered screens to this run's
- files, send the configured action key (F8 by
+ capture loop as Auto Capture Current File: append filtered screens to
+ the component's .txt/.cbl files, send the configured action key (F8 by
  default), and stop when the captured screen repeats. Only then queue
  the single F3 return to Screen 1. Unexpected Sql_* states fail safely.
 =====================================================================
@@ -2805,18 +2768,6 @@ function Invoke-PipelineScreen3Tick {
 
             $global:CR_PipelineSourceLogFile = Join-Path $TxtDir ($baseName + '.txt')
             $global:CR_PipelineSourceLogFileCbl = Join-Path $CblDir ($baseName + '.cbl')
-            try {
-                # Each run is a fresh capture for this component. Truncate
-                # both outputs before the first page is written so older
-                # source text can never remain appended to the new capture.
-                [System.IO.File]::WriteAllText($global:CR_PipelineSourceLogFile, '')
-                [System.IO.File]::WriteAllText($global:CR_PipelineSourceLogFileCbl, '')
-            } catch {
-                $reason = "Could not overwrite the previous source capture for '$baseName': $_"
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
-                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
-                return
-            }
             $global:CR_PipelineSourceCapturePreviousText = $null
             $global:CR_PipelineSourceCapturePages = 0
             $global:CR_PipelineSourceCaptureRetries = 0
@@ -3116,8 +3067,8 @@ function Invoke-PipelineListTick {
 function Get-DefaultConfig {
     [pscustomobject]@{
         LogFile               = "CapturedOutput.txt"
-        CopyDelayMs           = 300
-        AfterActionKeyDelayMs = 300
+        CopyDelayMs           = 150
+        AfterActionKeyDelayMs = 150
         TimerTickMs           = 50
         SkipRowsStart         = 0
         SkipRowsEnd           = 0
@@ -3232,7 +3183,7 @@ if ($Config.PSObject.Properties.Name -contains 'AfterActionKeyDelayMs') {
 } elseif ($Config.PSObject.Properties.Name -contains 'AfterF8DelayMs') {
     $AfterActionKeyDelayMs = [int]$Config.AfterF8DelayMs   # old config field name
 } else {
-    $AfterActionKeyDelayMs = 300
+    $AfterActionKeyDelayMs = 150
 }
 
 if ($Config.PSObject.Properties.Name -contains 'ActionKeyToken') {
@@ -4665,8 +4616,6 @@ function Stop-PipelineCapture {
     $global:CR_PipelineState         = 'CompScan_Action'
     $global:CR_ElapsedMs             = 0
     $global:CR_PipelineComponentIdx  = 0
-    $global:CR_PipelineExistingBCount = 0
-    $global:CR_PipelineBSelectionSent = $false
     $global:CR_PipelineEnvironmentIdx = 0
     $global:CR_PipelineSqlIterations = 0
     $global:CR_PipelineAfterBack     = $null
@@ -4865,8 +4814,6 @@ $global:CR_ModeIterations   = 0
 $global:CR_ActivePipelineConfig     = $null
 $global:CR_PipelineState            = 'CompScan_Action'
 $global:CR_PipelineComponentIdx     = 0
-$global:CR_PipelineExistingBCount   = 0
-$global:CR_PipelineBSelectionSent   = $false
 $global:CR_PipelineEnvironmentIdx   = 0
 $global:CR_PipelineSqlIterations    = 0
 $global:CR_PipelineAfterBack        = $null   # state to resume at once the single F3 "back" completes
@@ -5517,8 +5464,6 @@ $hotkeyAction = {
             $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompScan_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
-            $global:CR_PipelineExistingBCount   = 0
-            $global:CR_PipelineBSelectionSent   = $false
             $global:CR_PipelineEnvironmentIdx   = 0
             $global:CR_PipelineSqlIterations    = 0
             $global:CR_PipelineAfterBack        = $null
