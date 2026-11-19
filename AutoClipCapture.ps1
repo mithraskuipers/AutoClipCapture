@@ -253,32 +253,32 @@ $ConfigPath = Join-Path $PSScriptRoot "AutoClipCaptureConfig.json"
 function Get-DefaultPipelineTimingsMs {
     [pscustomobject]@{
         RepositoryList = [pscustomobject]@{
-            BeforeClickMs = 0
-            AfterClickMs = 1000
-            AfterSelectionLetterMs = 1000
-            AfterEnterMs = 1000
-            AfterClipboardCopyMs = 1000
-            InitialScanAfterClipboardCopyMs = 250
-            AfterPageKeyMs = 1000
-            AfterDeleteMs = 1000
-            AfterF3Ms = 1000
+            BeforeClickMs = 300
+            AfterClickMs = 300
+            AfterSelectionLetterMs = 300
+            AfterEnterMs = 300
+            AfterClipboardCopyMs = 300
+            InitialScanAfterClipboardCopyMs = 300
+            AfterPageKeyMs = 300
+            AfterDeleteMs = 300
+            AfterF3Ms = 300
         }
         ComponentVersion = [pscustomobject]@{
-            BeforeClickMs = 0
-            AfterClickMs = 1000
-            PauseAfterSBeforeEnterMs = 500
-            AfterEnterMs = 1000
-            AfterClipboardCopyMs = 1000
-            AfterF3Ms = 1000
+            BeforeClickMs = 300
+            AfterClickMs = 300
+            PauseAfterSBeforeEnterMs = 300
+            AfterEnterMs = 300
+            AfterClipboardCopyMs = 300
+            AfterF3Ms = 300
         }
         SourceCode = [pscustomobject]@{
-            AfterActionKeyMs = 250
-            AfterClipboardCopyMs = 250
-            AfterF3Ms = 1000
+            AfterActionKeyMs = 300
+            AfterClipboardCopyMs = 300
+            AfterF3Ms = 300
         }
         ComponentList = [pscustomobject]@{
-            AfterPageKeyMs = 250
-            AfterClipboardCopyMs = 250
+            AfterPageKeyMs = 300
+            AfterClipboardCopyMs = 300
         }
     }
 }
@@ -359,8 +359,8 @@ function Get-DefaultSqlSearchMode {
 function Get-DefaultConfig {
     [pscustomobject]@{
         LogFile                 = "CapturedOutput.txt"
-        CopyDelayMs             = 150
-        AfterActionKeyDelayMs   = 150
+        CopyDelayMs             = 300
+        AfterActionKeyDelayMs   = 300
         TimerTickMs             = 50
         SkipRowsStart           = 0
         SkipRowsEnd             = 0
@@ -3067,8 +3067,8 @@ function Invoke-PipelineListTick {
 function Get-DefaultConfig {
     [pscustomobject]@{
         LogFile               = "CapturedOutput.txt"
-        CopyDelayMs           = 150
-        AfterActionKeyDelayMs = 150
+        CopyDelayMs           = 300
+        AfterActionKeyDelayMs = 300
         TimerTickMs           = 50
         SkipRowsStart         = 0
         SkipRowsEnd           = 0
@@ -3183,7 +3183,7 @@ if ($Config.PSObject.Properties.Name -contains 'AfterActionKeyDelayMs') {
 } elseif ($Config.PSObject.Properties.Name -contains 'AfterF8DelayMs') {
     $AfterActionKeyDelayMs = [int]$Config.AfterF8DelayMs   # old config field name
 } else {
-    $AfterActionKeyDelayMs = 150
+    $AfterActionKeyDelayMs = 300
 }
 
 if ($Config.PSObject.Properties.Name -contains 'ActionKeyToken') {
