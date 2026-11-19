@@ -2059,18 +2059,44 @@ function Invoke-PipelineScreen1Tick {
 
             # Don't send HOME/DEL here. On this Host On-Demand screen,
             # HOME can focus the Show Deleted field, and DEL would erase
-            # its N value. Click the row first, then send B and Enter only.
+            # its N value. Click first, then give each key a separate
+            # one-second stage so the terminal cannot merge/repeat input.
             Invoke-Screen1RowClick -ScreenPoint $screenPt
-            Start-Sleep -Milliseconds 20
-            [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText + '{ENTER}')
-
-            $global:CR_PipelineState = 'CompZoom_Wait'
+            $global:CR_PipelineState = 'CompZoom_Type'
             $global:CR_ElapsedMs     = 0
+        }
+
+        'CompZoom_Type' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
+                $global:CR_PipelineState = 'CompZoom_Enter'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'CompZoom_Enter' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                $global:CR_PipelineState = 'CompZoom_Wait'
+                $global:CR_ElapsedMs = 0
+            }
         }
 
         'CompZoom_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2084,7 +2110,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompZoom_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2192,7 +2218,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompPage_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2206,7 +2232,7 @@ function Invoke-PipelineScreen1Tick {
 
         'CompPage_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2371,16 +2397,42 @@ function Invoke-PipelineScreen2Tick {
             }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
             Invoke-Screen1RowClick -ScreenPoint $screenPt
-            Start-Sleep -Milliseconds 20
-            [System.Windows.Forms.SendKeys]::SendWait('S{ENTER}')
-            $global:CR_PipelineScreen2CapturedText = $null
-            $global:CR_PipelineState = 'EnvSelect_Wait'
+            $global:CR_PipelineState = 'EnvSelect_TypeWait'
             $global:CR_ElapsedMs = 0
+        }
+
+        'EnvSelect_TypeWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('S')
+                $global:CR_PipelineState = 'EnvSelect_EnterWait'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'EnvSelect_EnterWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                $global:CR_PipelineScreen2CapturedText = $null
+                $global:CR_PipelineState = 'EnvSelect_Wait'
+                $global:CR_ElapsedMs = 0
+            }
         }
 
         'EnvSelect_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2394,7 +2446,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                 $sourceText = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
@@ -2716,6 +2768,9 @@ foreach ($d in @($TxtDir, $CblDir)) {
 
 $CopyDelayMs = [int]$Config.CopyDelayMs
 $TimerTickMs = [int]$Config.TimerTickMs
+# The repository pipeline gives each terminal interaction a full second
+# to settle, independently of the shorter delays used by other modes.
+$PipelineStepDelayMs = 1000
 
 if ($Config.PSObject.Properties.Name -contains 'AfterActionKeyDelayMs') {
     $AfterActionKeyDelayMs = [int]$Config.AfterActionKeyDelayMs
@@ -4372,7 +4427,7 @@ $tickAction = {
                 }
                 'Back_Wait' {
                     $global:CR_ElapsedMs += $TimerTickMs
-                    if ($global:CR_ElapsedMs -ge $AfterActionKeyDelayMs) {
+                    if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                         if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                             Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping." -ForegroundColor Red
                             Stop-PipelineCapture
@@ -4385,7 +4440,7 @@ $tickAction = {
                 }
                 'Back_Copy' {
                     $global:CR_ElapsedMs += $TimerTickMs
-                    if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                    if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
                         $text = ''
                         try {
                             if ([System.Windows.Forms.Clipboard]::ContainsText()) {
