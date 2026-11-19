@@ -2042,20 +2042,9 @@ function Invoke-PipelineScreen1Tick {
 
             Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page $($global:CR_PipelineScreen1PageIdx + 1), row $($rowIdx + 1)/$($global:CR_PipelineScreen1Rows.Count) - selecting" ([System.Drawing.Color]::Lime)
 
-            # Defensive: blank the Command line BEFORE touching the row.
-            # REPOLIST gives the top Command field priority over a row's
-            # line-command letter - if Command still holds leftover text
-            # (typed manually at some point and never cleared/submitted),
-            # the Enter below resubmits it too and the whole screen comes
-            # back as "Invalid REPOLIST Command", with the "B" silently
-            # dropped. {HOME} moves the cursor to the screen's first
-            # input field (the Command line on this panel); {DEL} is the
-            # 3270 "Erase EOF" function, which blanks from the cursor to
-            # the end of that field. If your emulator maps Erase EOF to a
-            # different key than Delete, swap it in here.
-            [System.Windows.Forms.SendKeys]::SendWait('{HOME}{DEL}')
-            Start-Sleep -Milliseconds 20
-
+            # Don't send HOME/DEL here. On this Host On-Demand screen,
+            # HOME can focus the Show Deleted field, and DEL would erase
+            # its N value. Click the row first, then send B and Enter only.
             Invoke-Screen1RowClick -ScreenPoint $screenPt
             Start-Sleep -Milliseconds 20
             [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText + '{ENTER}')
@@ -2105,26 +2094,10 @@ function Invoke-PipelineScreen1Tick {
                 elseif ($detected -eq 1) {
                     $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
                     if ($rejected) {
-                        # Not a blank row - REPOLIST rejected the whole
-                        # screen because the Command line still held
-                        # something when Enter went through (typically
-                        # left over from an earlier manual command), so
-                        # the "B" never actually got submitted. Retry
-                        # the same row - CompZoom_Action re-attempts the
-                        # Command-line clear every time it runs - rather
-                        # than silently treating it as blank and moving on.
-                        $global:CR_PipelineScreen1RetryCount++
-                        $maxRetries = [int]$s1.MaxRowRetries
-                        if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
-                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) on page $($global:CR_PipelineScreen1PageIdx + 1) was rejected ('$($s1.InvalidCommandText)') $maxRetries time(s) in a row. Stopping without advancing; clear the Command line and restart." -ForegroundColor Red
-                            Show-RelayResultOverlay -Text "ROW REJECTED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                            Stop-PipelineCapture
-                            return
-                        } else {
-                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Row $($global:CR_PipelineComponentIdx + 1) rejected by REPOLIST (stray Command-line text) - retrying ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
-                            $global:CR_PipelineState = 'CompZoom_Action'
-                        }
-                        $global:CR_ElapsedMs = 0
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOLIST rejected the selection for row $($global:CR_PipelineComponentIdx + 1): '$($s1.InvalidCommandText)'. Stopping without retrying or advancing; inspect and clear the command field manually." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "ROW REJECTED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
                     } else {
                         # Enter should have opened COMPONENT LIST. Keep
                         # checking this same page briefly for a delayed
