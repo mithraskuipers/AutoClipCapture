@@ -297,6 +297,10 @@ function Show-ConfigEditorGui {
 =====================================================================
 #>
 
+# Source-code Auto Capture Current File pacing. Lower this value to make
+# the paging/copy loop faster; it is used after F8 and after Ctrl+C.
+$SourceCaptureWaitMs = 500
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -2638,7 +2642,7 @@ function Invoke-PipelineScreen3Tick {
 
         'SrcCapture_Wait' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge $SourceCaptureWaitMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone during source capture. Stopping." -ForegroundColor Red
                     Stop-PipelineCapture
@@ -2653,7 +2657,7 @@ function Invoke-PipelineScreen3Tick {
 
         'SrcCapture_Copy' {
             $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge $PipelineStepDelayMs) {
+            if ($global:CR_ElapsedMs -ge $SourceCaptureWaitMs) {
                 $text = ''
                 try {
                     if ([System.Windows.Forms.Clipboard]::ContainsText()) {
