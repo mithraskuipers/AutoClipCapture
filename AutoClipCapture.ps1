@@ -1896,6 +1896,11 @@ function Get-Screen1RowsThroughLastCob {
                 $selectionBCount = [regex]::Matches($selectionPrefix, 'B', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count
             }
         }
+        $componentName = ''
+        if ($cobLines.ContainsKey([int]$clipboardLine)) {
+            $componentMatch = [regex]::Match($lineText, '\bCOB\b\s+(?<name>[A-Za-z0-9@#$._-]+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($componentMatch.Success) { $componentName = [string]$componentMatch.Groups['name'].Value }
+        }
         $rows.Add([pscustomobject]@{
             LineIndex = $screenRow
             ColIndex  = $selectionColumn
@@ -1903,9 +1908,133 @@ function Get-Screen1RowsThroughLastCob {
             ClipboardLineIndex = [int]$clipboardLine
             LineText = $lineText
             BCount  = [int]$selectionBCount
+            ComponentName = $componentName
         })
     }
     return $rows
+}
+
+# Copy the initial REPOSITORY LIST page and let the user choose the first
+# COB component by its list number or identifier. The selected screen row
+# is applied only to the initial scan; later F8 pages always start at the
+# first COB row automatically.
+function Select-InitialRepositoryCobStart {
+    param(
+        [IntPtr]$Handle,
+        $Pipeline
+    )
+
+    if (-not (Set-RelayForeground -Handle $Handle)) {
+        return [pscustomobject]@{ Accepted = $false; Cancelled = $false; Reason = 'The Host On-Demand window is unavailable.'; LineIndex = -1; Name = '' }
+    }
+    try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
+    [System.Windows.Forms.SendKeys]::SendWait('^c')
+    $copyDelay = [Math]::Max(150, [int]$PipelineTimingsMs.RepositoryList.InitialScanAfterClipboardCopyMs)
+    Start-Sleep -Milliseconds $copyDelay
+
+    $text = ''
+    try {
+        if ([System.Windows.Forms.Clipboard]::ContainsText()) { $text = [System.Windows.Forms.Clipboard]::GetText() }
+    } catch {
+        return [pscustomobject]@{ Accepted = $false; Cancelled = $false; Reason = "Could not read the initial REPOSITORY LIST page: $_"; LineIndex = -1; Name = '' }
+    }
+    if ((Get-PipelineScreenNumber -Text $text) -ne 1) {
+        return [pscustomobject]@{ Accepted = $false; Cancelled = $false; Reason = 'The target is not showing a recognizable REPOSITORY LIST page.'; LineIndex = -1; Name = '' }
+    }
+
+    $s1 = $Pipeline.Screen1Select
+    $pageRows = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
+    $rows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $pageRows)
+    $candidates = New-Object System.Collections.Generic.List[object]
+    for ($rowIndex = 0; $rowIndex -lt $rows.Count; $rowIndex++) {
+        $row = $rows[$rowIndex]
+        $name = [string]$row.ComponentName
+        # Filter/header entries such as DF* contain a wildcard and are
+        # not real repository components that can be selected.
+        if ([bool]$row.HasCob -and -not [string]::IsNullOrWhiteSpace($name) -and $name -notmatch '[*?]') {
+            $candidates.Add([pscustomobject]@{ Number = $candidates.Count + 1; RowIndex = $rowIndex; LineIndex = [int]$row.LineIndex; Name = $name })
+        }
+    }
+    if ($candidates.Count -eq 0) {
+        return [pscustomobject]@{ Accepted = $true; Cancelled = $false; Reason = ''; LineIndex = -1; Name = '' }
+    }
+
+    $listLines = @($candidates | ForEach-Object { '{0,2}. {1}' -f $_.Number, $_.Name })
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = 'Choose the first COB component'
+    $dialog.StartPosition = 'CenterScreen'
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.TopMost = $true
+    $dialog.ClientSize = New-Object System.Drawing.Size(500, 560)
+
+    $intro = New-Object System.Windows.Forms.Label
+    $intro.Text = "Found $($candidates.Count) COB component(s) on this REPOSITORY LIST page. Enter a list number or component name to choose where processing starts:"
+    $intro.Location = New-Object System.Drawing.Point(12, 12)
+    $intro.Size = New-Object System.Drawing.Size(476, 48)
+
+    $listBox = New-Object System.Windows.Forms.TextBox
+    $listBox.Location = New-Object System.Drawing.Point(12, 66)
+    $listBox.Size = New-Object System.Drawing.Size(476, 410)
+    $listBox.Multiline = $true
+    $listBox.ReadOnly = $true
+    $listBox.ScrollBars = 'Vertical'
+    $listBox.Font = New-Object System.Drawing.Font('Consolas', 10)
+    $listBox.Text = $listLines -join [Environment]::NewLine
+
+    $choiceLabel = New-Object System.Windows.Forms.Label
+    $choiceLabel.Text = 'Start at number or component name:'
+    $choiceLabel.Location = New-Object System.Drawing.Point(12, 488)
+    $choiceLabel.Size = New-Object System.Drawing.Size(270, 22)
+
+    $choiceBox = New-Object System.Windows.Forms.TextBox
+    $choiceBox.Location = New-Object System.Drawing.Point(12, 514)
+    $choiceBox.Size = New-Object System.Drawing.Size(270, 25)
+    $choiceBox.Text = '1'
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = 'Start'
+    $okButton.Location = New-Object System.Drawing.Point(326, 510)
+    $okButton.Size = New-Object System.Drawing.Size(78, 30)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.Location = New-Object System.Drawing.Point(410, 510)
+    $cancelButton.Size = New-Object System.Drawing.Size(78, 30)
+    $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+    $dialog.Controls.AddRange(@($intro, $listBox, $choiceLabel, $choiceBox, $okButton, $cancelButton))
+    $dialog.AcceptButton = $okButton
+    $dialog.CancelButton = $cancelButton
+    $dialog.Add_Shown({ $choiceBox.Focus(); $choiceBox.SelectAll() })
+    $okButton.Add_Click({
+        $typedChoice = $choiceBox.Text.Trim()
+        $chosen = $null
+        $number = 0
+        if ([int]::TryParse($typedChoice, [ref]$number)) {
+            if ($number -ge 1 -and $number -le $candidates.Count) { $chosen = $candidates[$number - 1] }
+        } else {
+            $nameMatches = @($candidates | Where-Object { [string]::Equals([string]$_.Name, $typedChoice, [System.StringComparison]::OrdinalIgnoreCase) })
+            if ($nameMatches.Count -eq 1) { $chosen = $nameMatches[0] }
+        }
+        if ($null -eq $chosen) {
+            [void][System.Windows.Forms.MessageBox]::Show($dialog, 'Enter a listed number or a unique component name. If names repeat, choose the numbered entry.', 'Invalid component', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        $dialog.Tag = $chosen
+        $dialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $dialog.Close()
+    })
+
+    $dialogResult = $dialog.ShowDialog()
+    $chosenRow = $dialog.Tag
+    $dialog.Dispose()
+    if ($dialogResult -ne [System.Windows.Forms.DialogResult]::OK -or $null -eq $chosenRow) {
+        return [pscustomobject]@{ Accepted = $false; Cancelled = $true; Reason = ''; LineIndex = -1; Name = '' }
+    }
+    return [pscustomobject]@{ Accepted = $true; Cancelled = $false; Reason = ''; LineIndex = [int]$chosenRow.LineIndex; Name = [string]$chosenRow.Name }
 }
 
 # Record row-specific failures with the complete repository row from the
@@ -2160,6 +2289,30 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
                 $global:CR_PipelineComponentIdx  = 0
+                if ([int]$global:CR_PipelineStartRowLineIndex -ge 0) {
+                    $selectedRowIndex = -1
+                    for ($candidateIndex = 0; $candidateIndex -lt $global:CR_PipelineScreen1Rows.Count; $candidateIndex++) {
+                        $candidateRow = $global:CR_PipelineScreen1Rows[$candidateIndex]
+                        if ([int]$candidateRow.LineIndex -eq [int]$global:CR_PipelineStartRowLineIndex -and
+                            [bool]$candidateRow.HasCob -and
+                            [string]::Equals([string]$candidateRow.ComponentName, [string]$global:CR_PipelineStartRowName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $selectedRowIndex = $candidateIndex
+                            break
+                        }
+                    }
+                    if ($selectedRowIndex -lt 0) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Selected component '$($global:CR_PipelineStartRowName)' was not present at the selected screen row on the initial scan. Stopping without clicking." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text 'SELECTED COMPONENT NOT FOUND - STOPPED' -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    $global:CR_PipelineComponentIdx = $selectedRowIndex
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Starting at COB component $($global:CR_PipelineStartRowName) (screen row $($global:CR_PipelineStartRowLineIndex))." -ForegroundColor Cyan
+                }
+                # The chosen start row applies only to the first page. F8
+                # initializes every later page at its first COB row.
+                $global:CR_PipelineStartRowLineIndex = -1
+                $global:CR_PipelineStartRowName = ''
                 $global:CR_PipelineLastProcessedCobLineIndex = -1
                 $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
@@ -5091,6 +5244,8 @@ function Stop-PipelineCapture {
     $global:CR_PipelineState         = 'CompScan_Action'
     $global:CR_ElapsedMs             = 0
     $global:CR_PipelineComponentIdx  = 0
+    $global:CR_PipelineStartRowLineIndex = -1
+    $global:CR_PipelineStartRowName = ''
     $global:CR_PipelineLastProcessedCobLineIndex = -1
     $global:CR_PipelineBWriteRetryCount = 0
     $global:CR_PipelineCleanupLineIndex = -1
@@ -5302,6 +5457,8 @@ $global:CR_ModeIterations   = 0
 $global:CR_ActivePipelineConfig     = $null
 $global:CR_PipelineState            = 'CompScan_Action'
 $global:CR_PipelineComponentIdx     = 0
+$global:CR_PipelineStartRowLineIndex = -1
+$global:CR_PipelineStartRowName = ''
 $global:CR_PipelineLastProcessedCobLineIndex = -1
 $global:CR_PipelineBWriteRetryCount = 0
 $global:CR_PipelineCleanupLineIndex = -1
@@ -6067,6 +6224,8 @@ $hotkeyAction = {
             }
 
             $useComponentList = ($null -ne $pipeline.ComponentList) -and [bool]$pipeline.ComponentList.Enabled
+            $initialStartLineIndex = -1
+            $initialStartName = ''
 
             # ---- Screen1 calibration gate: the row-scanning pass
             # (CompScan_Action, see Screen1.ps1) needs real pixel
@@ -6092,6 +6251,22 @@ $hotkeyAction = {
                 }
             }
 
+            if (-not $useComponentList -and $null -ne $pipeline.Screen1Select) {
+                $startChoice = Select-InitialRepositoryCobStart -Handle $target.Handle -Pipeline $pipeline
+                if (-not $startChoice.Accepted) {
+                    if ($startChoice.Cancelled) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled in the component picker." -ForegroundColor Yellow
+                    } else {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Start cancelled: $($startChoice.Reason)" -ForegroundColor Red
+                        [void][System.Windows.Forms.MessageBox]::Show([string]$startChoice.Reason, 'Cannot choose a COB component', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                    }
+                    Hide-RelayStatus
+                    return
+                }
+                $initialStartLineIndex = [int]$startChoice.LineIndex
+                $initialStartName = [string]$startChoice.Name
+            }
+
             Hide-RelayResultOverlay
             $global:CR_TargetHandle             = $target.Handle
             $global:CR_TargetTitle              = $target.Title
@@ -6100,6 +6275,8 @@ $hotkeyAction = {
             $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompScan_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
+            $global:CR_PipelineStartRowLineIndex = $initialStartLineIndex
+            $global:CR_PipelineStartRowName = $initialStartName
             $global:CR_PipelineLastProcessedCobLineIndex = -1
             $global:CR_PipelineBWriteRetryCount = 0
             $global:CR_PipelineCleanupLineIndex = -1
