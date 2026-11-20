@@ -4835,8 +4835,15 @@ function Get-PipelineScreenName {
         }
     }
     if (Test-RelayTextContains -Text $topRow -Needle 'REPOSITORY LIST') { return 'REPOSITORY LIST' }
+    # HOD may preserve the terminal's column spacing in copied text, so
+    # the words in the centered row-0 heading can be separated by more
+    # than one space (or another whitespace character). Normalize row 0
+    # before matching the page title.
+    $normalizedTopRow = [regex]::Replace($topRow, '\s+', ' ').Trim()
+    if ($normalizedTopRow -match '(?i)REPOSITORY\s+LIST') { return 'REPOSITORY LIST' }
     if ((Test-RelayTextContains -Text $topRow -Needle 'COMPONENT LIST') -or
-        (Test-RelayTextContains -Text $topRow -Needle 'COMPONENT VERSION')) {
+        (Test-RelayTextContains -Text $topRow -Needle 'COMPONENT VERSION') -or
+        $normalizedTopRow -match '(?i)COMPONENT\s+(LIST|VERSION)') {
         return 'COMPONENT LIST'
     }
     if (Test-RelayTextContains -Text $topRow -Needle 'Menu  Utilities  Compilers  Help') { return 'SOURCE CODE' }
