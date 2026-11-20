@@ -1972,9 +1972,9 @@ function Get-Screen1RowsOnPage {
     return $RowsPerPage
 }
 
-# The REPOSITORY LIST command field is a separate input area below its
-# data rows. Never let the row-selection automation continue if copied
-# screen text shows that field already contains input.
+# The REPOSITORY LIST command prompt has two protected blank cells
+# immediately after "Command ===> ". Other text later on that same line
+# is normal and must not block row processing.
 function Assert-Screen1CommandFieldEmpty {
     param(
         [string]$Text,
@@ -1982,13 +1982,25 @@ function Assert-Screen1CommandFieldEmpty {
     )
 
     if ([string]::IsNullOrEmpty($Text)) { return $true }
-    $commandLine = [regex]::Match($Text, '(?im)^[ \t]*Command[ \t]*===>[ \t]*(.*)$')
-    if (-not $commandLine.Success -or [string]::IsNullOrWhiteSpace($commandLine.Groups[1].Value)) {
+    $commandPrompt = [regex]::Match($Text, '(?im)^[ \t]*Command[ \t]*===>')
+    if (-not $commandPrompt.Success) { return $true }
+
+    $lineEnd = $Text.IndexOfAny([char[]]@("`r", "`n"), $commandPrompt.Index)
+    if ($lineEnd -lt 0) { $lineEnd = $Text.Length }
+    $suffixStart = $commandPrompt.Index + $commandPrompt.Length
+    $afterPrompt = $Text.Substring($suffixStart, ($lineEnd - $suffixStart))
+    # The visible prompt ends with one separator space. Check only the two
+    # cells after that space; text farther right on the line is legitimate.
+    if ($afterPrompt.StartsWith(' ') -or $afterPrompt.StartsWith("`t")) {
+        $afterPrompt = $afterPrompt.Substring(1)
+    }
+    $checkLength = [Math]::Min(2, $afterPrompt.Length)
+    if ($checkLength -eq 0 -or [string]::IsNullOrWhiteSpace($afterPrompt.Substring(0, $checkLength))) {
         return $true
     }
 
-    $commandText = $commandLine.Groups[1].Value.Trim()
-    Write-Host "[AutoClipCapture] [$PipelineName] REPOSITORY LIST command field is not empty ('$commandText'). Stopping before another row can be selected." -ForegroundColor Red
+    $commandText = $afterPrompt.Substring(0, $checkLength)
+    Write-Host "[AutoClipCapture] [$PipelineName] REPOSITORY LIST has text in the two protected cells after 'Command ===> ' ('$commandText'). Stopping before another row can be selected." -ForegroundColor Red
     Show-RelayResultOverlay -Text "COMMAND FIELD NOT EMPTY - STOPPED" -Color ([System.Drawing.Color]::Red)
     Stop-PipelineCapture
     return $false
