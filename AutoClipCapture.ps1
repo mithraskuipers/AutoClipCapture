@@ -2322,7 +2322,13 @@ function Invoke-PipelineScreen1Tick {
                 # clicking between them can leave HOD outside the row field.
                 $global:CR_PipelineState = 'CompZoom_Enter'
                 $global:CR_ElapsedMs = 0
-                [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
+                $selectionText = [string]$s1.SelectionText
+                if ($selectionText -cne 'B' -or -not [Win32]::SendUnicodeCharacter([char]$selectionText[0])) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not send the literal selection character '$selectionText'; stopping before Enter." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "SELECTION KEY FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
                 Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entered B for row $($global:CR_PipelineComponentIdx + 1); preparing immediate Enter" ([System.Drawing.Color]::Lime)
             }
         }
@@ -2604,6 +2610,16 @@ function Invoke-PipelineScreen1Tick {
                     if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
                     $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
                     $freshRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
+                    $activeRowIndex = [int]$global:CR_PipelineComponentIdx
+                    if ($activeRowIndex -ge 0 -and $activeRowIndex -lt $freshRows.Count) {
+                        $activeRow = $freshRows[$activeRowIndex]
+                        if ($activeRow.HasCob) {
+                            $cobMatch = [regex]::Match([string]$activeRow.LineText, '\bCOB\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                            $selectionPrefix = if ($cobMatch.Success) { ([string]$activeRow.LineText).Substring(0, $cobMatch.Index).Trim() } else { '' }
+                            $selectionCodes = @($selectionPrefix.ToCharArray() | ForEach-Object { 'U+{0:X4}' -f [int][char]$_ }) -join ' '
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Copied selection field after Enter: '$selectionPrefix' (Unicode $selectionCodes), expected exactly 'B' before COB." -ForegroundColor Yellow
+                        }
+                    }
                     if ($freshRows.Count -ne $global:CR_PipelineScreen1Rows.Count) {
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST row count changed after Enter ($($global:CR_PipelineScreen1Rows.Count) -> $($freshRows.Count)); stopping before recovery." -ForegroundColor Red
                         Show-RelayResultOverlay -Text "REPOSITORY ROW COUNT CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
@@ -3882,10 +3898,21 @@ public static class Win32
         public UIntPtr dwExtraInfo;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
     [StructLayout(LayoutKind.Explicit)]
     public struct INPUTUNION
     {
         [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -3897,6 +3924,22 @@ public static class Win32
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    // Send a literal UTF-16 character without translating it through the
+    // active keyboard layout. Repository commands must always be ASCII B.
+    public static bool SendUnicodeCharacter(char character)
+    {
+        INPUT[] inputs = new INPUT[2];
+        inputs[0].type = 1;
+        inputs[0].U.ki.wScan = character;
+        inputs[0].U.ki.dwFlags = 0x0004;
+        inputs[0].U.ki.dwExtraInfo = UIntPtr.Zero;
+        inputs[1].type = 1;
+        inputs[1].U.ki.wScan = character;
+        inputs[1].U.ki.dwFlags = 0x0004 | 0x0002;
+        inputs[1].U.ki.dwExtraInfo = UIntPtr.Zero;
+        return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))) == inputs.Length;
+    }
 
     public static bool ClickLeftAtCurrentCursor()
     {
