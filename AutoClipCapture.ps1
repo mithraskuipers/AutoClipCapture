@@ -2536,6 +2536,41 @@ function Invoke-PipelineScreen1Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before pressing Enter after B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
                     return
                 }
+                $rowIdx = [int]$global:CR_PipelineComponentIdx
+                $row = if ($rowIdx -ge 0 -and $rowIdx -lt $global:CR_PipelineScreen1Rows.Count) { $global:CR_PipelineScreen1Rows[$rowIdx] } else { $null }
+                if ($null -eq $row -or -not [bool]$row.HasCob -or [int]$row.BCount -ne 1) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] The verified B is no longer mapped to exactly one B on the active COB row; stopping before Enter." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "B ROW CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+                if ($null -eq $pt) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Terminal geometry changed before Enter; stopping before key input." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "TERMINAL CALIBRATION STALE - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+                if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not re-focus the verified COB selection cell before Enter; stopping safely." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "ROW REFOCUS FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Re-focused verified B on COB row $($row.LineIndex); preparing Enter" ([System.Drawing.Color]::Lime)
+                $global:CR_PipelineState = 'CompZoom_EnterSend'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'CompZoom_EnterSend' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable after re-focusing the B row and before Enter.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
+                    return
+                }
                 Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entering verified COB row $($global:CR_PipelineComponentIdx + 1)" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineState = 'CompZoom_Wait'
                 $global:CR_ElapsedMs = 0
@@ -2593,11 +2628,12 @@ function Invoke-PipelineScreen1Tick {
                         Stop-PipelineCapture
                         return
                     }
-                    $global:CR_PipelineScreen1Rows = $freshRows
-                    $global:CR_PipelineScreen1PrevPageText = $text
+                    $previousRepositoryText = [string]$global:CR_PipelineScreen1PrevPageText
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION not found; still on REPOSITORY LIST" ([System.Drawing.Color]::Yellow)
                     $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
-                    $topRightChanged = Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen1PrevPageText -After $text
+                    $topRightChanged = Test-PipelineTopRightChanged -Before $previousRepositoryText -After $text
+                    $global:CR_PipelineScreen1Rows = $freshRows
+                    $global:CR_PipelineScreen1PrevPageText = $text
                     if ($rejected -or $topRightChanged) {
                         $reason = 'REPOSITORY LIST stayed open and its top-right message changed after B/Enter.'
                         Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Removing B, logging the row, and continuing." -ForegroundColor Yellow
