@@ -1809,16 +1809,17 @@ public static class CR_DpiAwareness {
                       handler), so a pipeline with no ComponentList
                       pre-pass lands here immediately.
    CompZoom_Action  - click the row at
-                      $global:CR_PipelineScreen1Rows[$global:CR_PipelineComponentIdx],
-                      type the selection letter, press Enter.
+                      $global:CR_PipelineScreen1Rows[$global:CR_PipelineComponentIdx]
+                      and type the selection letter.
+   CompZoom_VerifyWait/Copy - copy the REPOSITORY LIST after typing B
+                      and require B at the active row with no stale B
+                      on any other COB row before Enter.
+   CompZoom_Cleanup_* - click a stale B row, delete it, and recopy the
+                      page to verify it is clear before continuing.
    CompZoom_Wait    - short delay before copying, so the new screen
                       has time to render.
    CompZoom_Copy    - Ctrl+C, read the clipboard, work out what
                       happened, branch accordingly (see below).
-   CompReject_Action - click the same row after a REPOSITORY LIST
-                       command error, then remove B with Delete.
-   CompReject_DeleteWait - pause before Delete, then wait before
-                           advancing to the next COB row.
    CompNext_Action  - move past a non-COB row, or decide the next COB
                       row. After the last COB row, show the centered
                       page-complete message and trigger a page turn.
@@ -1884,12 +1885,22 @@ function Get-Screen1RowsThroughLastCob {
         $screenRow = $firstScreenRow + $rowOffset
         if ($screenRow -lt 0 -or $screenRow -ge $terminalRows) { continue }
         $clipboardLine = $firstClipboardCobLine + $rowOffset
+        $lineText = [string]$lines[$clipboardLine]
+        $selectionBCount = 0
+        if ($cobLines.ContainsKey([int]$clipboardLine)) {
+            $rowCobMatch = [regex]::Match($lineText, '\bCOB\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($rowCobMatch.Success) {
+                $selectionPrefix = $lineText.Substring(0, $rowCobMatch.Index)
+                $selectionBCount = [regex]::Matches($selectionPrefix, 'B', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Count
+            }
+        }
         $rows.Add([pscustomobject]@{
             LineIndex = $screenRow
             ColIndex  = $selectionColumn
             HasCob    = $cobLines.ContainsKey([int]$clipboardLine)
             ClipboardLineIndex = [int]$clipboardLine
-            LineText = [string]$lines[$clipboardLine]
+            LineText = $lineText
+            BCount  = [int]$selectionBCount
         })
     }
     return $rows
@@ -1948,7 +1959,16 @@ function Skip-PipelineRowAfterFailure {
     Hide-StepMarker
     if ($RepositoryListCommandMayBePresent -or [int]$global:CR_PipelineCurrentScreen -eq 1) {
         if ($RepositoryListCommandMayBePresent) {
-            $global:CR_PipelineState = 'CompReject_Action'
+            $currentRow = if ($rowIndex -ge 0 -and $rowIndex -lt $global:CR_PipelineScreen1Rows.Count) { $global:CR_PipelineScreen1Rows[$rowIndex] } else { $null }
+            if ($null -ne $currentRow -and [bool]$currentRow.HasCob -and [int]$currentRow.BCount -gt 0) {
+                $global:CR_PipelineCleanupLineIndex = [int]$currentRow.LineIndex
+                $global:CR_PipelineCleanupKeepCount = 0
+                $global:CR_PipelineCleanupResumeState = 'CompNext_Action'
+                $global:CR_PipelineCleanupRetryCount = 0
+                $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
+            } else {
+                $global:CR_PipelineState = 'CompNext_Action'
+            }
         } else {
             $global:CR_PipelineState = 'CompNext_Action'
         }
@@ -2103,6 +2123,7 @@ function Invoke-PipelineScreen1Tick {
                 Stop-PipelineCapture
                 return
             }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Copying REPOSITORY LIST page $($global:CR_PipelineScreen1PageIdx + 1)" ([System.Drawing.Color]::Lime)
             # Read the page's own "Row <first> of <total>" indicator
             # before assuming it's a full RowsPerPage rows - matters if
             # the pipeline is started while already sitting on a
@@ -2132,13 +2153,16 @@ function Invoke-PipelineScreen1Tick {
                 }
                 if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
 
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing REPOSITORY LIST page $($global:CR_PipelineScreen1PageIdx + 1); looking for COB rows" ([System.Drawing.Color]::Lime)
                 $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
                 $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
                 $cobCount = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob }).Count
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Repository page $($global:CR_PipelineScreen1PageIdx + 1): found $cobCount COB row(s) across $($global:CR_PipelineScreen1Rows.Count) row slot(s) through the last COB." -ForegroundColor DarkCyan
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found $cobCount COB row(s) on REPOSITORY LIST page $($global:CR_PipelineScreen1PageIdx + 1)" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineState = if ($global:CR_PipelineScreen1Rows.Count -gt 0) { 'CompZoom_Action' } else { 'CompNext_Action' }
                 $global:CR_ElapsedMs     = 0
             }
@@ -2160,6 +2184,20 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_ElapsedMs = 0
                 return
             }
+            $staleBRow = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob -and [int]$_.BCount -gt 0 } | Select-Object -First 1)
+            if ($staleBRow.Count -gt 0) {
+                $global:CR_PipelineCleanupLineIndex = [int]$staleBRow[0].LineIndex
+                $global:CR_PipelineCleanupKeepCount = 0
+                $global:CR_PipelineCleanupResumeState = 'CompZoom_Action'
+                $global:CR_PipelineCleanupRetryCount = 0
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found stale B on screen row $($staleBRow[0].LineIndex); clearing it before selecting this COB row" ([System.Drawing.Color]::Yellow)
+                $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
+                $global:CR_ElapsedMs = 0
+                return
+            }
+            $cobOrdinal = @($global:CR_PipelineScreen1Rows | Select-Object -First ($rowIdx + 1) | Where-Object { $_.HasCob }).Count
+            $cobTotal = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob }).Count
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Looking for COB row $cobOrdinal of $cobTotal at screen row $($row.LineIndex)" ([System.Drawing.Color]::Lime)
             $terminalRows = if ($null -ne $s1.TerminalRows) { [int]$s1.TerminalRows } else { 32 }
             $firstDataRow = [int]$s1.FirstDataRowLineIndex
             if ($s1.PSObject.Properties.Name -contains 'StartRowOffset' -and $null -ne $s1.StartRowOffset) {
@@ -2239,6 +2277,7 @@ function Invoke-PipelineScreen1Tick {
                 Stop-PipelineCapture
                 return
             }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Clicked selection cell for COB row $($rowIdx + 1); preparing B" ([System.Drawing.Color]::Lime)
             $global:CR_PipelineState = 'CompZoom_Type'
             $global:CR_ElapsedMs     = 0
         }
@@ -2270,8 +2309,220 @@ function Invoke-PipelineScreen1Tick {
                     Stop-PipelineCapture
                     return
                 }
+                # Advance before SendWait: it can pump Windows messages,
+                # so a nested timer tick must see VerifyWait and never
+                # dispatch a second B for this row.
+                $global:CR_PipelineState = 'CompZoom_VerifyWait'
+                $global:CR_ElapsedMs = 0
                 [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
-                $global:CR_PipelineState = 'CompZoom_Enter'
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entered B for row $($global:CR_PipelineComponentIdx + 1); copying page to verify the selection" ([System.Drawing.Color]::Lime)
+            }
+        }
+
+        'CompZoom_VerifyWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterSelectionLetterMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable while verifying B on the REPOSITORY LIST row.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
+                    return
+                }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Copying REPOSITORY LIST to verify B placement before Enter" ([System.Drawing.Color]::Lime)
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'CompZoom_VerifyCopy'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'CompZoom_VerifyCopy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) { $text = [System.Windows.Forms.Clipboard]::GetText() }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed while verifying B: $_" -ForegroundColor Yellow
+                }
+                $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+                if ($detected -ne 1) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Expected REPOSITORY LIST while verifying B before Enter; detected screen $detected. Stopping safely." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "ROW SELECTION UNVERIFIED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
+
+                $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
+                $freshRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
+                $global:CR_PipelineScreen1Rows = $freshRows
+                $global:CR_PipelineScreen1PrevPageText = $text
+                $rowIdx = [int]$global:CR_PipelineComponentIdx
+                $targetRow = if ($rowIdx -ge 0 -and $rowIdx -lt $freshRows.Count) { $freshRows[$rowIdx] } else { $null }
+                if ($null -eq $targetRow -or -not $targetRow.HasCob) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not map the active COB row in the fresh REPOSITORY LIST copy; stopping before Enter." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "ROW SELECTION UNVERIFIED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+
+                $staleBRow = @($freshRows | Where-Object { $_.HasCob -and $_.LineIndex -ne $targetRow.LineIndex -and [int]$_.BCount -gt 0 } | Select-Object -First 1)
+                if ($staleBRow.Count -gt 0) {
+                    $global:CR_PipelineCleanupLineIndex = [int]$staleBRow[0].LineIndex
+                    $global:CR_PipelineCleanupKeepCount = 0
+                    $global:CR_PipelineCleanupResumeState = 'CompZoom_VerifyWait'
+                    $global:CR_PipelineCleanupRetryCount = 0
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] B is on old COB row $($staleBRow[0].LineIndex); clearing old row before Enter" ([System.Drawing.Color]::Yellow)
+                    $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
+                    $global:CR_ElapsedMs = 0
+                    return
+                }
+
+                if ([int]$targetRow.BCount -eq 1) {
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Verified B on target COB row $($targetRow.LineIndex); no other COB row has B. Pressing Enter next" ([System.Drawing.Color]::Lime)
+                    $global:CR_PipelineState = 'CompZoom_Enter'
+                    $global:CR_ElapsedMs = 0
+                } elseif ([int]$targetRow.BCount -gt 1) {
+                    $global:CR_PipelineCleanupLineIndex = [int]$targetRow.LineIndex
+                    $global:CR_PipelineCleanupKeepCount = 1
+                    $global:CR_PipelineCleanupResumeState = 'CompZoom_VerifyWait'
+                    $global:CR_PipelineCleanupRetryCount = 0
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found $($targetRow.BCount) B characters at the target; removing extras before Enter" ([System.Drawing.Color]::Yellow)
+                    $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
+                    $global:CR_ElapsedMs = 0
+                } else {
+                    $global:CR_PipelineBWriteRetryCount++
+                    $maxBWriteRetries = [Math]::Max(1, [int]$s1.MaxRowRetries)
+                    if ($global:CR_PipelineBWriteRetryCount -gt $maxBWriteRetries) {
+                        Skip-PipelineRowAfterFailure -Reason 'B was not visible in the active COB selection cell after repeated click/type attempts; Enter was not sent.' -ObservedText $text
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] B was not found on target row; retrying click and B ($($global:CR_PipelineBWriteRetryCount)/$maxBWriteRetries)" ([System.Drawing.Color]::Yellow)
+                    $global:CR_PipelineState = 'CompZoom_Type'
+                    $global:CR_ElapsedMs = 0
+                }
+            }
+        }
+
+        'CompZoom_Cleanup_Action' {
+            $cleanupLine = [int]$global:CR_PipelineCleanupLineIndex
+            $cleanupRow = @($global:CR_PipelineScreen1Rows | Where-Object { [int]$_.LineIndex -eq $cleanupLine } | Select-Object -First 1)
+            if ($cleanupRow.Count -eq 0 -or -not $cleanupRow[0].HasCob) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not locate stale B at screen row $cleanupLine; stopping before Delete." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "STALE B ROW NOT FOUND - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            $cleanupRow = $cleanupRow[0]
+            if ([int]$cleanupRow.BCount -le [int]$global:CR_PipelineCleanupKeepCount) {
+                $global:CR_PipelineState = [string]$global:CR_PipelineCleanupResumeState
+                $global:CR_ElapsedMs = 0
+                return
+            }
+            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $cleanupRow.LineIndex -ColIndex $cleanupRow.ColIndex
+            if ($null -eq $pt) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Stale B row $cleanupLine is outside calibrated terminal bounds; stopping before Delete." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "STALE B CLICK OUT OF BOUNDS - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable while clearing a stale repository B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
+                return
+            }
+            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Clicking old selection at screen row $cleanupLine to clear B" ([System.Drawing.Color]::Yellow)
+            if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Windows did not accept click on stale B row $cleanupLine; stopping before Delete." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "STALE B CLICK FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
+            $global:CR_PipelineState = 'CompZoom_CleanupDeleteWait'
+            $global:CR_ElapsedMs = 0
+        }
+
+        'CompZoom_CleanupDeleteWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before deleting a stale B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
+                    return
+                }
+                $cleanupRow = @($global:CR_PipelineScreen1Rows | Where-Object { [int]$_.LineIndex -eq [int]$global:CR_PipelineCleanupLineIndex } | Select-Object -First 1)
+                if ($cleanupRow.Count -eq 0) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Stale B row disappeared before Delete; stopping safely." -ForegroundColor Red
+                    Stop-PipelineCapture
+                    return
+                }
+                $deleteCount = [Math]::Max(1, ([int]$cleanupRow[0].BCount - [int]$global:CR_PipelineCleanupKeepCount))
+                $global:CR_PipelineState = 'CompZoom_CleanupVerifyWait'
+                $global:CR_ElapsedMs = 0
+                for ($deleteIndex = 0; $deleteIndex -lt $deleteCount; $deleteIndex++) {
+                    [System.Windows.Forms.SendKeys]::SendWait('{DELETE}')
+                }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Deleted $deleteCount B character(s) from old row; copying page to verify" ([System.Drawing.Color]::Yellow)
+            }
+        }
+
+        'CompZoom_CleanupVerifyWait' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterDeleteMs) {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable while verifying that stale B was deleted.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
+                    return
+                }
+                [System.Windows.Forms.SendKeys]::SendWait('^c')
+                $global:CR_PipelineState = 'CompZoom_CleanupCopy'
+                $global:CR_ElapsedMs = 0
+            }
+        }
+
+        'CompZoom_CleanupCopy' {
+            $global:CR_ElapsedMs += $TimerTickMs
+            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs) {
+                $text = ''
+                try {
+                    if ([System.Windows.Forms.Clipboard]::ContainsText()) { $text = [System.Windows.Forms.Clipboard]::GetText() }
+                } catch {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed while checking stale B cleanup: $_" -ForegroundColor Yellow
+                }
+                $detected = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+                if ($detected -ne 1) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST was not visible after deleting stale B; stopping before typing or Enter." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "STALE B CLEANUP UNVERIFIED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
+                $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
+                $freshRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
+                $global:CR_PipelineScreen1Rows = $freshRows
+                $global:CR_PipelineScreen1PrevPageText = $text
+                $cleanupRow = @($freshRows | Where-Object { [int]$_.LineIndex -eq [int]$global:CR_PipelineCleanupLineIndex } | Select-Object -First 1)
+                if ($cleanupRow.Count -eq 0) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not map screen row $($global:CR_PipelineCleanupLineIndex) after Delete; stopping before continuing." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "CLEANUP ROW NOT FOUND - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                if ([int]$cleanupRow[0].BCount -gt [int]$global:CR_PipelineCleanupKeepCount) {
+                    $global:CR_PipelineCleanupRetryCount++
+                    if ($global:CR_PipelineCleanupRetryCount -gt 1) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] B is still present at old row $($global:CR_PipelineCleanupLineIndex) after retry; stopping before processing another row." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "OLD B STILL PRESENT - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Old row still contains B; retrying clear once" ([System.Drawing.Color]::Yellow)
+                    $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
+                    $global:CR_ElapsedMs = 0
+                    return
+                }
+                if ([int]$global:CR_PipelineCleanupKeepCount -eq 1) {
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Verified target row has exactly one B" ([System.Drawing.Color]::Lime)
+                } else {
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Verified old row has no B" ([System.Drawing.Color]::Lime)
+                }
+                $global:CR_PipelineState = [string]$global:CR_PipelineCleanupResumeState
                 $global:CR_ElapsedMs = 0
             }
         }
@@ -2283,9 +2534,10 @@ function Invoke-PipelineScreen1Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before pressing Enter after B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
                     return
                 }
-                [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entering verified COB row $($global:CR_PipelineComponentIdx + 1)" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineState = 'CompZoom_Wait'
                 $global:CR_ElapsedMs = 0
+                [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
             }
         }
 
@@ -2296,6 +2548,7 @@ function Invoke-PipelineScreen1Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable while waiting for COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
                     return
                 }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Copying screen after Enter; looking for COMPONENT VERSION" ([System.Drawing.Color]::Lime)
                 [System.Windows.Forms.SendKeys]::SendWait('^c')
                 $global:CR_PipelineState = 'CompZoom_Copy'
                 $global:CR_ElapsedMs     = 0
@@ -2324,11 +2577,23 @@ function Invoke-PipelineScreen1Tick {
                     $global:CR_PipelineScreen2CapturedText = $text
                     $global:CR_PipelineScreen2BeforeSelectionText = $text
                     $global:CR_PipelineSourceSelectionSent = $false
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found COMPONENT VERSION after Enter" ([System.Drawing.Color]::Lime)
                     $global:CR_PipelineState = 'EnvLog_Action'
                     $global:CR_ElapsedMs     = 0
                 }
                 elseif ($detected -eq 1) {
                     if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
+                    $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
+                    $freshRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
+                    if ($freshRows.Count -ne $global:CR_PipelineScreen1Rows.Count) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST row count changed after Enter ($($global:CR_PipelineScreen1Rows.Count) -> $($freshRows.Count)); stopping before recovery." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "REPOSITORY ROW COUNT CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    $global:CR_PipelineScreen1Rows = $freshRows
+                    $global:CR_PipelineScreen1PrevPageText = $text
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION not found; still on REPOSITORY LIST" ([System.Drawing.Color]::Yellow)
                     $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
                     $topRightChanged = Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen1PrevPageText -After $text
                     if ($rejected -or $topRightChanged) {
@@ -2376,82 +2641,30 @@ function Invoke-PipelineScreen1Tick {
             }
         }
 
-        'CompReject_Action' {
-            $rowIdx = [int]$global:CR_PipelineComponentIdx
-            if ($rowIdx -lt 0 -or $rowIdx -ge $global:CR_PipelineScreen1Rows.Count) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Rejected row index is invalid; stopping before Delete." -ForegroundColor Red
-                Stop-PipelineCapture
-                return
-            }
-            $row = $global:CR_PipelineScreen1Rows[$rowIdx]
-            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
-            if ($null -eq $pt) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Cannot safely return to the rejected B field; calibrated point is outside the terminal. Stopping." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "CANNOT CLEAR ROW COMMAND - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
-                return
-            }
-
-            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
-            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] B/Enter was rejected; about to click row $($rowIdx + 1) and remove B with Delete"
-            if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
-
-            if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping before clearing the rejected B." -ForegroundColor Red
-                Stop-PipelineCapture
-                return
-            }
-            $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
-            if ($null -eq $pt) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Terminal geometry changed while preparing to remove the rejected B. Stopping." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "CANNOT CLEAR ROW COMMAND - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
-                return
-            }
-            $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
-            if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Windows did not accept the click to clear the rejected B; stopping before Delete." -ForegroundColor Red
-                Show-RelayResultOverlay -Text "ROW CLICK FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                Stop-PipelineCapture
-                return
-            }
-            $global:CR_PipelineState = 'CompReject_DeleteWait'
-            $global:CR_ElapsedMs = 0
-        }
-
-        'CompReject_DeleteWait' {
-            $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
-                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window is gone - stopping before removing B." -ForegroundColor Red
-                    Stop-PipelineCapture
-                    return
-                }
-                [System.Windows.Forms.SendKeys]::SendWait('{DELETE}')
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Removed rejected B; advancing without F3" ([System.Drawing.Color]::Orange)
-                $global:CR_PipelineState = 'CompReject_AdvanceWait'
-                $global:CR_ElapsedMs = 0
-            }
-        }
-
-        'CompReject_AdvanceWait' {
-            $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterDeleteMs) {
-                $global:CR_PipelineState = 'CompNext_Action'
-                $global:CR_ElapsedMs = 0
-            }
-        }
-
         'CompNext_Action' {
+            $staleBRow = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob -and [int]$_.BCount -gt 0 } | Select-Object -First 1)
+            if ($staleBRow.Count -gt 0) {
+                $global:CR_PipelineCleanupLineIndex = [int]$staleBRow[0].LineIndex
+                $global:CR_PipelineCleanupKeepCount = 0
+                $global:CR_PipelineCleanupResumeState = 'CompNext_Action'
+                $global:CR_PipelineCleanupRetryCount = 0
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Before advancing, found B on old COB row $($staleBRow[0].LineIndex); clearing it and verifying" ([System.Drawing.Color]::Yellow)
+                $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
+                $global:CR_ElapsedMs = 0
+                return
+            }
             $nextRow = [int]$global:CR_PipelineComponentIdx + 1
             if ($nextRow -lt $global:CR_PipelineScreen1Rows.Count) {
                 $global:CR_PipelineComponentIdx = $nextRow
+                $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Advancing to repository row $($nextRow + 1); checking its COB selection cell" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineState = 'CompZoom_Action'
                 $global:CR_ElapsedMs     = 0
             } else {
                 # Every COB row on this page has been processed. Put a
                 # clear centered message on screen before paging forward.
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] All COB rows on page $($global:CR_PipelineScreen1PageIdx + 1) verified; preparing F8" ([System.Drawing.Color]::Lime)
                 Show-RelayResultOverlay -Text "DONE PROCESSING THIS PAGE" -Color ([System.Drawing.Color]::LimeGreen)
                 $global:CR_PipelineState = 'CompPage_Action'
                 $global:CR_ElapsedMs     = 0
@@ -2474,6 +2687,7 @@ function Invoke-PipelineScreen1Tick {
                 Stop-PipelineCapture
                 return
             }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Sending $($s1.PageNextDisplay) to copy the next REPOSITORY LIST page" ([System.Drawing.Color]::Lime)
             Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Paging to next screen ($($s1.PageNextDisplay))" ([System.Drawing.Color]::Orange)
             [System.Windows.Forms.SendKeys]::SendWait([string]$s1.PageNextToken)
             $global:CR_PipelineState = 'CompPage_Wait'
@@ -2513,6 +2727,7 @@ function Invoke-PipelineScreen1Tick {
                     Stop-PipelineCapture
                     return
                 }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing newly copied REPOSITORY LIST page" ([System.Drawing.Color]::Lime)
                 if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
 
                 $isEndOfList = Test-RelayTextContains -Text $text -Needle ([string]$s1.EndOfListText)
@@ -2547,6 +2762,7 @@ function Invoke-PipelineScreen1Tick {
 
                 $global:CR_PipelineScreen1Rows = $nextPageRows
                 $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Repository page $($global:CR_PipelineScreen1PageIdx + 1): found $cobCount COB row(s) across $($global:CR_PipelineScreen1Rows.Count) row slot(s) through the last COB." -ForegroundColor DarkCyan
                 $global:CR_PipelineState = if ($global:CR_PipelineScreen1Rows.Count -gt 0) { 'CompZoom_Action' } else { 'CompNext_Action' }
@@ -2599,6 +2815,7 @@ function Invoke-PipelineScreen2Tick {
     switch ($global:CR_PipelineState) {
 
         'EnvLog_Action' {
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Logging COMPONENT VERSION page; then looking for PROD, UT, or ET" ([System.Drawing.Color]::Lime)
             if ([bool]$s1.LogScreen2Text -and -not [string]::IsNullOrEmpty($global:CR_PipelineScreen2CapturedText)) {
                 try {
                     $outPath = Join-Path $LogDir ([string]$s1.OutputFileName)
@@ -2619,6 +2836,7 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_Action' {
             $componentText = [string]$global:CR_PipelineScreen2CapturedText
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing COMPONENT VERSION page for the topmost PROD, UT, or ET row" ([System.Drawing.Color]::Lime)
             $componentLines = @($componentText -split "`r`n|`r|`n")
             # Clipboard line positions are not screen row positions: some
             # terminal copies omit leading blank rows or headers. Find the
@@ -2637,6 +2855,7 @@ function Invoke-PipelineScreen2Tick {
             }
             if ($sourceCandidates.Count -eq 0) {
                 $reason = 'No PROD, UT, or ET marker was found in COMPONENT VERSION clipboard text.'
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Did not find PROD, UT, or ET; logging row failure and returning" ([System.Drawing.Color]::Yellow)
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
                 Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
@@ -2648,6 +2867,7 @@ function Invoke-PipelineScreen2Tick {
             if ($sourceCandidates.Count -gt 1) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Found $($sourceCandidates.Count) PROD/UT/ET rows; selecting the topmost marker '$($sourceCandidates[0].Match.Value)' and continuing." -ForegroundColor DarkCyan
             }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found $($sourceCandidates.Count) PROD/UT/ET marker(s); using topmost $($sourceCandidates[0].Match.Value)" ([System.Drawing.Color]::Lime)
             $sourceMatch = $sourceCandidates[0].Match
             $sourceCol = $sourceMatch.Index - 2
             $sourceRow = 8
@@ -2673,6 +2893,7 @@ function Invoke-PipelineScreen2Tick {
             }
             if ($existingSelections.Count -eq 1) {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 already has S before $($sourceMatch.Value); skipping S and pressing Enter only." -ForegroundColor DarkGray
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found existing S before $($sourceMatch.Value); checking source page with Enter" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineSourceSelectionSent = $true
                 $global:CR_PipelineState = 'EnvSelect_EnterWait'
                 $global:CR_ElapsedMs = 0
@@ -2711,6 +2932,7 @@ function Invoke-PipelineScreen2Tick {
                 Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Clicked COMPONENT VERSION row 8 selection cell for $($sourceMatch.Value)" ([System.Drawing.Color]::Lime)
             $global:CR_PipelineState = 'EnvSelect_TypeWait'
             $global:CR_ElapsedMs = 0
         }
@@ -2728,6 +2950,7 @@ function Invoke-PipelineScreen2Tick {
                     $global:CR_PipelineSourceSelectionSent = $true
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Sending the single S selection for this COMPONENT VERSION page." -ForegroundColor DarkGray
                     [System.Windows.Forms.SendKeys]::SendWait('S')
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entered S; preparing Enter to open SOURCE CODE" ([System.Drawing.Color]::Lime)
                 } else {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] S was already sent for this COMPONENT VERSION page; skipping duplicate input." -ForegroundColor Yellow
                 }
@@ -2743,6 +2966,7 @@ function Invoke-PipelineScreen2Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before pressing Enter on COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
                     return
                 }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Sending Enter on COMPONENT VERSION" ([System.Drawing.Color]::Lime)
                 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
                 $global:CR_PipelineScreen2CapturedText = $null
                 $global:CR_PipelineState = 'EnvSelect_Wait'
@@ -2757,6 +2981,7 @@ function Invoke-PipelineScreen2Tick {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable after pressing Enter on COMPONENT VERSION.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
                     return
                 }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Copying screen after Enter; checking for SOURCE CODE menu" ([System.Drawing.Color]::Lime)
                 [System.Windows.Forms.SendKeys]::SendWait('^c')
                 $global:CR_PipelineState = 'EnvSelect_Copy'
                 $global:CR_ElapsedMs = 0
@@ -2779,14 +3004,17 @@ function Invoke-PipelineScreen2Tick {
                 $componentCommandError = ($detected -eq 2) -and (Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen2BeforeSelectionText -After $sourceText)
                 if ($detected -eq 2 -and $componentCommandError) {
                     $reason = 'COMPONENT VERSION top-right error message changed after S/Enter.'
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE not found; COMPONENT VERSION shows an error" ([System.Drawing.Color]::Yellow)
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
                     Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
                 } elseif ($detected -eq 3) {
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found SOURCE CODE menu; starting Auto Capture Current File" ([System.Drawing.Color]::Lime)
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE verified; starting Auto Capture Current File" ([System.Drawing.Color]::Orange)
                     $global:CR_PipelineSourceCaptureText = $sourceText
                     $global:CR_PipelineState = 'SrcCapture_Start'
                     $global:CR_ElapsedMs = 0
                 } else {
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE menu not found yet (screen $detected); checking again" ([System.Drawing.Color]::Yellow)
                     $global:CR_PipelineScreen1RetryCount++
                     $maxRetries = [int]$s1.MaxRowRetries
                     if ($global:CR_PipelineScreen1RetryCount -gt $maxRetries) {
@@ -2868,12 +3096,14 @@ function Invoke-PipelineScreen3Tick {
             $global:CR_PipelineSourceCapturePages = 0
             $global:CR_PipelineSourceCaptureRetries = 0
             Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File started for $baseName; output: $($global:CR_PipelineSourceLogFile) and $($global:CR_PipelineSourceLogFileCbl)" -ForegroundColor Green
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found source file $baseName; starting Auto Capture Current File" ([System.Drawing.Color]::Lime)
             $global:CR_PipelineState = 'SrcCapture_Save'
             $global:CR_ElapsedMs = 0
         }
 
         'SrcCapture_Save' {
             $text = [string]$global:CR_PipelineSourceCaptureText
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing source capture page $($global:CR_PipelineSourceCapturePages + 1)" ([System.Drawing.Color]::Lime)
             if ([string]::IsNullOrWhiteSpace($text)) {
                 $reason = 'Source capture returned empty text.'
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
@@ -2888,6 +3118,7 @@ function Invoke-PipelineScreen3Tick {
                 $similarity = Get-TextSimilarity -A $global:CR_PipelineSourceCapturePreviousText -B $text
                 if ($similarity -ge $DupDetectThreshold) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File complete after $($global:CR_PipelineSourceCapturePages) page(s); the next F8 screen repeated the previous page." -ForegroundColor Green
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found repeated source page; capture is complete, returning with F3" ([System.Drawing.Color]::Lime)
                     Show-RelayResultOverlay -Text "SOURCE CAPTURE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
                     $global:CR_PipelineScreen1RetryCount = 0
                     $global:CR_PipelineAfterBack = 'CompNext_Action'
@@ -2920,6 +3151,7 @@ function Invoke-PipelineScreen3Tick {
             $global:CR_PipelineSourceCapturePreviousText = $text
             $global:CR_PipelineSourceCapturePages++
             Write-Host "[AutoClipCapture] [$($pipeline.Name)] Saved source page $($global:CR_PipelineSourceCapturePages)." -ForegroundColor DarkCyan
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Saved source capture page $($global:CR_PipelineSourceCapturePages)" ([System.Drawing.Color]::Lime)
             $global:CR_PipelineState = 'SrcCapture_Action'
             $global:CR_ElapsedMs = 0
         }
@@ -2945,6 +3177,7 @@ function Invoke-PipelineScreen3Tick {
                     return
                 }
                 try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Copying next SOURCE CODE page" ([System.Drawing.Color]::Lime)
                 [System.Windows.Forms.SendKeys]::SendWait('^c')
                 $global:CR_PipelineState = 'SrcCapture_Copy'
                 $global:CR_ElapsedMs = 0
@@ -2977,9 +3210,11 @@ function Invoke-PipelineScreen3Tick {
                     return
                 }
 
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing copied SOURCE CODE page" ([System.Drawing.Color]::Lime)
                 $sourceScreen = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
                 if ($sourceScreen -ne 3) {
                     $reason = "Auto Capture Current File left SOURCE CODE (detected screen $sourceScreen)."
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE not found on copied page; logging failure" ([System.Drawing.Color]::Yellow)
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
                     Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
                     return
@@ -4007,18 +4242,16 @@ function Test-Screen1Calibrated {
     return ($null -ne $Screen1Select -and [double]$Screen1Select.CharWidthPx -gt 0 -and [double]$Screen1Select.CharHeightPx -gt 0 -and $null -ne $Screen1Select.FirstDataRowLineIndex -and $null -ne $Screen1Select.SelectionColumnIndex -and $null -ne $Screen1Select.TerminalLeft -and $null -ne $Screen1Select.TerminalTop -and $null -ne $Screen1Select.TerminalWidth -and $null -ne $Screen1Select.TerminalHeight -and $null -ne $Screen1Select.TerminalColumns -and $null -ne $Screen1Select.TerminalRows -and $null -ne $Screen1Select.CalibrationClientWidth -and $null -ne $Screen1Select.CalibrationClientHeight)
 }
 
-# ---- Top-left status overlay: a tiny always-on-top banner that never
-# steals keyboard focus (StatusOverlay overrides ShowWithoutActivation
-# and adds WS_EX_NOACTIVATE), so showing/updating it never interrupts
-# whatever window the automation is currently sending keys to. ----
-$statusForm = New-Object StatusOverlay
+# ---- Top-left status overlay: a click-through, non-activating history
+# panel so its larger 10-line view never blocks the terminal underneath. ----
+$statusForm = New-Object MenuOverlay
 $statusForm.FormBorderStyle = 'None'
 $statusForm.StartPosition   = 'Manual'
 $statusForm.ShowInTaskbar   = $false
 $statusForm.TopMost         = $true
 $statusForm.BackColor       = [System.Drawing.Color]::Black
 $statusForm.Opacity         = 0.85
-$statusForm.Size            = New-Object System.Drawing.Size(760, 64)
+$statusForm.Size            = New-Object System.Drawing.Size(1040, 220)
 
 $screenArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $statusForm.Location = New-Object System.Drawing.Point(($screenArea.Left + 8), ($screenArea.Top + 8))
@@ -4027,11 +4260,12 @@ $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Dock      = 'Fill'
 $statusLabel.Padding   = New-Object System.Windows.Forms.Padding(8, 4, 8, 4)
 $statusLabel.AutoSize  = $false
-$statusLabel.TextAlign = 'MiddleLeft'
+$statusLabel.TextAlign = 'TopLeft'
 $statusLabel.ForeColor = [System.Drawing.Color]::Lime
 $statusLabel.Font      = New-Object System.Drawing.Font('Consolas', 9, [System.Drawing.FontStyle]::Bold)
 $statusLabel.Text      = ''
 $statusForm.Controls.Add($statusLabel)
+$global:CR_StatusHistory = New-Object 'System.Collections.Generic.List[string]'
 
 # Force the overlay's handle to exist now (so Select-TargetWindow can
 # compare clicked windows against it) without actually showing it yet.
@@ -4043,8 +4277,12 @@ function Set-RelayStatus {
         [string]$Text,
         [System.Drawing.Color]$Color = [System.Drawing.Color]::Lime
     )
+    $statusLine = ($Text -replace '[\r\n]+', ' ').Trim()
+    if ($statusLine.Length -gt 120) { $statusLine = $statusLine.Substring(0, 117) + '...' }
+    $global:CR_StatusHistory.Add("[$(Get-Date -Format 'HH:mm:ss')] $statusLine")
+    while ($global:CR_StatusHistory.Count -gt 10) { $global:CR_StatusHistory.RemoveAt(0) }
     $statusLabel.ForeColor = $Color
-    $statusLabel.Text      = $Text
+    $statusLabel.Text      = $global:CR_StatusHistory -join [Environment]::NewLine
     if (-not $statusForm.Visible) { $statusForm.Show() }
 }
 
@@ -4770,6 +5008,11 @@ function Stop-PipelineCapture {
     $global:CR_PipelineState         = 'CompScan_Action'
     $global:CR_ElapsedMs             = 0
     $global:CR_PipelineComponentIdx  = 0
+    $global:CR_PipelineBWriteRetryCount = 0
+    $global:CR_PipelineCleanupLineIndex = -1
+    $global:CR_PipelineCleanupKeepCount = 0
+    $global:CR_PipelineCleanupResumeState = 'CompZoom_Action'
+    $global:CR_PipelineCleanupRetryCount = 0
     $global:CR_PipelineEnvironmentIdx = 0
     $global:CR_PipelineSqlIterations = 0
     $global:CR_PipelineAfterBack     = $null
@@ -4973,6 +5216,11 @@ $global:CR_ModeIterations   = 0
 $global:CR_ActivePipelineConfig     = $null
 $global:CR_PipelineState            = 'CompScan_Action'
 $global:CR_PipelineComponentIdx     = 0
+$global:CR_PipelineBWriteRetryCount = 0
+$global:CR_PipelineCleanupLineIndex = -1
+$global:CR_PipelineCleanupKeepCount = 0
+$global:CR_PipelineCleanupResumeState = 'CompZoom_Action'
+$global:CR_PipelineCleanupRetryCount = 0
 $global:CR_PipelineEnvironmentIdx   = 0
 $global:CR_PipelineSqlIterations    = 0
 $global:CR_PipelineAfterBack        = $null   # state to resume at once the single F3 "back" completes
@@ -4990,7 +5238,8 @@ $global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_componen
 # ---- Screen1 row-selection state (see AutoClipCaptureSqlPipelineScreen1.ps1).
 # $global:CR_PipelineComponentIdx (declared above) is reused here as the
 # 0-based index *into $global:CR_PipelineScreen1Rows* (reset to 0 every
-# time a new page is scanned/paged into). ----
+# time a new page is scanned/paged into). Each row also carries BCount,
+# freshly derived from the selection field before COB. ----
 $global:CR_PipelineScreen1PageIdx      = 0     # 0-based page counter, for MaxPages/logging
 $global:CR_PipelineScreen1PrevPageText = $null # previous page's raw capture, for end-of-list duplicate detection
 $global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen"/"no rows found" retries
@@ -5126,6 +5375,27 @@ $tickAction = {
                         }
 
                         if ($expected -eq 1 -and -not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
+
+                        if ($expected -eq 1) {
+                            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Back on REPOSITORY LIST; copying and checking old COB selection marks" ([System.Drawing.Color]::Lime)
+                            $repositoryRows = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$pipeline.Screen1Select.RowsPerPage)
+                            $refreshedRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $pipeline.Screen1Select -RowCount $repositoryRows)
+                            $previousSlotCount = $global:CR_PipelineScreen1Rows.Count
+                            if ($refreshedRows.Count -eq 0 -or $refreshedRows.Count -ne $previousSlotCount) {
+                                Write-Host "[AutoClipCapture] [$($pipeline.Name)] REPOSITORY LIST row count changed after return ($previousSlotCount -> $($refreshedRows.Count)); stopping before advancing." -ForegroundColor Red
+                                Show-RelayResultOverlay -Text "REPOSITORY ROW COUNT CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                                Stop-PipelineCapture
+                                return
+                            }
+                            if ($global:CR_PipelineComponentIdx -ge $refreshedRows.Count) {
+                                Write-Host "[AutoClipCapture] [$($pipeline.Name)] The refreshed REPOSITORY LIST rows no longer align with the active row index; stopping safely." -ForegroundColor Red
+                                Show-RelayResultOverlay -Text "ROW MAPPING CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                                Stop-PipelineCapture
+                                return
+                            }
+                            $global:CR_PipelineScreen1Rows = $refreshedRows
+                            $global:CR_PipelineScreen1PrevPageText = $text
+                        }
 
                         $global:CR_PipelineState     = $global:CR_PipelineAfterBack
                         $global:CR_PipelineAfterBack = $null
@@ -5660,6 +5930,11 @@ $hotkeyAction = {
             $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompScan_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
+            $global:CR_PipelineBWriteRetryCount = 0
+            $global:CR_PipelineCleanupLineIndex = -1
+            $global:CR_PipelineCleanupKeepCount = 0
+            $global:CR_PipelineCleanupResumeState = 'CompZoom_Action'
+            $global:CR_PipelineCleanupRetryCount = 0
             $global:CR_PipelineEnvironmentIdx   = 0
             $global:CR_PipelineSqlIterations    = 0
             $global:CR_PipelineAfterBack        = $null
