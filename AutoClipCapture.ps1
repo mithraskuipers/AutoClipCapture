@@ -105,6 +105,11 @@
                        clipboard involved. Ignored while the Toggle
                        relay or a scan mode is running.
 
+   Ctrl+Shift+S     -> Stop the current automation globally.
+   Ctrl+Shift+P     -> Pause or resume the current automation globally.
+   Ctrl+Shift+R     -> Completely restart AutoClipCapture, clearing its
+                       in-memory automation state and reloading config.
+
    [Pipeline hotkeys] -> A pipeline walks the COB rows on REPOSITORY
                        LIST. For each row it selects B, enters
                        COMPONENT VERSION, selects S beside PROD/UT/ET
@@ -2182,6 +2187,11 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_ElapsedMs = 0
                 return
             }
+            # The SOURCE CAPTURE COMPLETE banner may still be within its
+            # display timeout when this row is reached. Hide it before
+            # placing the cursor/clicking; click-through styling is a
+            # second safeguard against overlays intercepting input.
+            Hide-RelayResultOverlay
             if ([int]$row.BCount -gt 0) {
                 $global:CR_PipelineCleanupLineIndex = [int]$row.LineIndex
                 $global:CR_PipelineCleanupKeepCount = 0
@@ -3132,7 +3142,7 @@ function Invoke-PipelineScreen3Tick {
                 if ($similarity -ge $DupDetectThreshold) {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File complete after $($global:CR_PipelineSourceCapturePages) page(s); the next F8 screen repeated the previous page." -ForegroundColor Green
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found repeated source page; capture is complete, returning with F3" ([System.Drawing.Color]::Lime)
-                    Show-RelayResultOverlay -Text "SOURCE CAPTURE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
+                    Show-RelayResultOverlay -Text "SOURCE CAPTURE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen) -TopRight
                     $global:CR_PipelineScreen1RetryCount = 0
                     $global:CR_PipelineAfterBack = 'CompNext_Action'
                     $global:CR_PipelineState = 'Back_Action'
@@ -3773,6 +3783,10 @@ $PauseHotkeyId     = 8
 $PauseModifiers    = 0x0002 -bor 0x0004 # MOD_CONTROL | MOD_SHIFT
 $PauseKey          = 0x50              # P
 $PauseDisplay      = 'Ctrl+Shift+P'
+$RestartHotkeyId   = 9
+$RestartModifiers  = 0x0002 -bor 0x0004 # MOD_CONTROL | MOD_SHIFT
+$RestartKey        = 0x52              # R
+$RestartDisplay    = 'Ctrl+Shift+R'
 
 $F3HotkeyId      = 3
 if ($Config.PSObject.Properties.Name -contains 'F3Hotkey' -and $null -ne $Config.F3Hotkey) {
@@ -4177,6 +4191,9 @@ if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $StopHotkeyId, $StopModifiers
 if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $PauseHotkeyId, $PauseModifiers, $PauseKey)) {
     Write-Host "Failed to register the PAUSE hotkey ($PauseDisplay). It may already be in use by another app." -ForegroundColor Red
 }
+if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $RestartHotkeyId, $RestartModifiers, $RestartKey)) {
+    Write-Host "Failed to register the RESTART hotkey ($RestartDisplay). It may already be in use by another app." -ForegroundColor Red
+}
 
 # ---- Register one global hotkey per enabled Mode. IDs start at 100 so
 # they never collide with ToggleHotkeyId(1)/ExitHotkeyId(2), or with
@@ -4304,11 +4321,12 @@ function Hide-RelayStatus {
 }
 
 # ---- Big centered "result" banner used by scan Modes to announce their
-# outcome (e.g. "SQL FOUND" / "NO SQL FOUND"). Reuses the same
-# non-activating StatusOverlay window type as the corner status banner
-# above, just bigger, centered, and auto-hiding after
-# $ResultOverlayDurationMs (0 = stays until the next action starts). ----
-$resultOverlay = New-Object StatusOverlay
+# outcome (e.g. "SQL FOUND" / "NO SQL FOUND"). Uses the non-activating,
+# click-through MenuOverlay type so a visible banner can never intercept
+# a simulated click on the target window underneath it. It is bigger,
+# centered, and auto-hiding after $ResultOverlayDurationMs (0 = stays
+# until the next action starts). ----
+$resultOverlay = New-Object MenuOverlay
 $resultOverlay.FormBorderStyle = 'None'
 $resultOverlay.StartPosition   = 'Manual'
 $resultOverlay.ShowInTaskbar   = $false
@@ -4337,15 +4355,21 @@ function Show-RelayResultOverlay {
     param(
         [string]$Text,
         [System.Drawing.Color]$Color = [System.Drawing.Color]::LimeGreen,
-        [int]$DurationMs = $ResultOverlayDurationMs
+        [int]$DurationMs = $ResultOverlayDurationMs,
+        [switch]$TopRight
     )
     $resultHideTimer.Stop()
     $resultOverlay.BackColor = $Color
     $resultLabel.Text        = $Text
 
     $screenArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $x = $screenArea.Left + [int](($screenArea.Width  - $resultOverlay.Width)  / 2)
-    $y = $screenArea.Top  + [int](($screenArea.Height - $resultOverlay.Height) / 2)
+    if ($TopRight) {
+        $x = $screenArea.Right - $resultOverlay.Width - 16
+        $y = $screenArea.Top + 16
+    } else {
+        $x = $screenArea.Left + [int](($screenArea.Width  - $resultOverlay.Width)  / 2)
+        $y = $screenArea.Top  + [int](($screenArea.Height - $resultOverlay.Height) / 2)
+    }
     $resultOverlay.Location = New-Object System.Drawing.Point($x, $y)
 
     $resultOverlay.Show()
@@ -5095,6 +5119,7 @@ Write-Host "  $ToggleDisplay  -> Auto capture current file (start/stop the captu
 Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $StopDisplay  -> stop the current automation" -ForegroundColor White
 Write-Host "  $PauseDisplay  -> pause/resume the current automation" -ForegroundColor White
+Write-Host "  $RestartDisplay  -> completely restart AutoClipCapture" -ForegroundColor White
 Write-Host "  $ExitDisplay  -> quit"
 Write-Host "  $F3Display  -> send a single F3 to the focused window"
 foreach ($hkId in $ModeHotkeyMap.Keys) {
@@ -5146,6 +5171,7 @@ foreach ($hkId in ($ModeHotkeyMap.Keys | Sort-Object)) {
 [void]$menuRows.Add(@([string]$ToggleDisplay, 'Auto capture current file'))
 [void]$menuRows.Add(@([string]$StopDisplay, 'Stop the current automation'))
 [void]$menuRows.Add(@([string]$PauseDisplay, 'Pause/resume the current automation'))
+[void]$menuRows.Add(@([string]$RestartDisplay, 'Completely restart AutoClipCapture'))
 foreach ($hkId in ($PipelineHotkeyMap.Keys | Sort-Object)) {
     $p = $PipelineHotkeyMap[$hkId]
     [void]$menuRows.Add(@([string]$p.Hotkey.Display, "$($p.Name) pipeline (start on the REPOSITORY LIST page)"))
@@ -5738,6 +5764,11 @@ $hotkeyAction = {
         Write-Host "[AutoClipCapture] Exiting..." -ForegroundColor Magenta
         [System.Windows.Forms.Application]::Exit()
     }
+    elseif ($id -eq $RestartHotkeyId) {
+        Write-Host "[AutoClipCapture] Restarting completely by $RestartDisplay..." -ForegroundColor Cyan
+        $global:CR_RestartRequested = $true
+        [System.Windows.Forms.Application]::Exit()
+    }
     elseif ($id -eq $F3HotkeyId) {
         if (-not (Test-RightModifierSatisfied -Modifiers $F3Modifiers -RequireRight $F3RequireRightModifier)) { return }
         if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
@@ -6009,6 +6040,7 @@ $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $F3HotkeyId)     | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $StopHotkeyId)    | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $PauseHotkeyId)   | Out-Null
+[HotkeyForm]::UnregisterHotKey($FormHandle, $RestartHotkeyId) | Out-Null
 Unregister-PipelineStepHotkey
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null
@@ -6021,3 +6053,12 @@ $menuOverlay.Dispose()
 $statusForm.Dispose()
 $resultOverlay.Dispose()
 Write-Host "AutoClipCapture stopped."
+if ($global:CR_RestartRequested) {
+    $restartExecutable = Join-Path $PSHOME 'powershell.exe'
+    $restartArguments = '-STA -NoProfile -NoLogo -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+    try {
+        Start-Process -FilePath $restartExecutable -ArgumentList $restartArguments -WorkingDirectory $PSScriptRoot
+    } catch {
+        Write-Host "Could not restart AutoClipCapture: $_" -ForegroundColor Red
+    }
+}
