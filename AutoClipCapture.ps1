@@ -1847,10 +1847,11 @@ public static class CR_DpiAwareness {
 =====================================================================
 #>
 
-# Builds row slots through the last COB line on the copied page.
+# Builds row slots through the last real COB data row on the copied page.
 # Clipboard line indices may start after omitted headers/blank rows, so
-# the first COB line is anchored to calibrated FirstDataRowLineIndex
-# (screen row 6); subsequent rows use their relative offset from it.
+# the first COB row with a concrete component name is anchored to
+# calibrated FirstDataRowLineIndex (screen row 6); wildcard filter rows
+# such as "COB DQ*" are not data and must not shift this anchor.
 function Get-Screen1RowsThroughLastCob {
     param(
         [string]$Text,
@@ -1864,7 +1865,12 @@ function Get-Screen1RowsThroughLastCob {
     $lines = @($Text -split "`r`n|`r|`n")
     $cobLineIndexes = New-Object System.Collections.Generic.List[int]
     for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
-        if ([regex]::IsMatch($lines[$lineIndex], '\bCOB\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+        $componentMatch = [regex]::Match(
+            $lines[$lineIndex],
+            '\bCOB\b\s+(?<name>[A-Za-z0-9@#$._-]+)(?=\s|$)',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        if ($componentMatch.Success -and $componentMatch.Groups['name'].Value -notmatch '[*?]') {
             $cobLineIndexes.Add($lineIndex)
         }
     }
@@ -1898,7 +1904,7 @@ function Get-Screen1RowsThroughLastCob {
         }
         $componentName = ''
         if ($cobLines.ContainsKey([int]$clipboardLine)) {
-            $componentMatch = [regex]::Match($lineText, '\bCOB\b\s+(?<name>[A-Za-z0-9@#$._-]+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $componentMatch = [regex]::Match($lineText, '\bCOB\b\s+(?<name>[A-Za-z0-9@#$._-]+)(?=\s|$)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
             if ($componentMatch.Success) { $componentName = [string]$componentMatch.Groups['name'].Value }
         }
         $rows.Add([pscustomobject]@{
