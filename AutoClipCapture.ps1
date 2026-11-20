@@ -2987,8 +2987,11 @@ function Invoke-PipelineScreen2Tick {
                     # Mark before dispatch so a recovered/re-entered state
                     # can never type a second S on this COMPONENT VERSION.
                     $global:CR_PipelineSourceSelectionSent = $true
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Sending the single S selection for this COMPONENT VERSION page." -ForegroundColor DarkGray
-                    [System.Windows.Forms.SendKeys]::SendWait('S')
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Sending the single literal S selection for this COMPONENT VERSION page." -ForegroundColor DarkGray
+                    if (-not [Win32]::SendUnicodeCharacter([char]'S')) {
+                        Skip-PipelineRowAfterFailure -Reason 'Could not send the literal S selection character.' -ObservedText ([string]$global:CR_PipelineScreen2CapturedText)
+                        return
+                    }
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entered S; preparing Enter to open SOURCE CODE" ([System.Drawing.Color]::Lime)
                 } else {
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] S was already sent for this COMPONENT VERSION page; skipping duplicate input." -ForegroundColor Yellow
