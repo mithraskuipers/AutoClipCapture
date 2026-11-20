@@ -1939,7 +1939,13 @@ function Select-InitialRepositoryCobStart {
         return [pscustomobject]@{ Accepted = $false; Cancelled = $false; Reason = "Could not read the initial REPOSITORY LIST page: $_"; LineIndex = -1; Name = '' }
     }
     if ((Get-PipelineScreenNumber -Text $text) -ne 1) {
-        return [pscustomobject]@{ Accepted = $false; Cancelled = $false; Reason = 'The target is not showing a recognizable REPOSITORY LIST page.'; LineIndex = -1; Name = '' }
+        $previewLines = @($text -split "`r`n|`r|`n" | Select-Object -First 3)
+        $preview = [regex]::Replace(($previewLines -join ' | '), '\s+', ' ').Trim()
+        if ($preview.Length -gt 180) { $preview = $preview.Substring(0, 180) }
+        $reason = 'The copied terminal text did not identify REPOSITORY LIST on its top rows.'
+        if (-not [string]::IsNullOrWhiteSpace($preview)) { $reason += " Clipboard preview: '$preview'" }
+        else { $reason += ' The clipboard was empty.' }
+        return [pscustomobject]@{ Accepted = $false; Cancelled = $false; Reason = $reason; LineIndex = -1; Name = '' }
     }
 
     $s1 = $Pipeline.Screen1Select
@@ -4822,31 +4828,44 @@ function Get-PipelineScreenName {
     param([string]$Text)
 
     $topRow = ''
+    $topLines = New-Object System.Collections.Generic.List[string]
     if (-not [string]::IsNullOrEmpty($Text)) {
-        # Some HOD clipboard copies begin with blank lines even though
-        # the terminal's row 0 is visible. Skip only those leading blank
-        # clipboard lines, then identify the page from row 0's text.
+        # HOD can omit leading blank rows or split the centered heading
+        # around fixed-width terminal columns in the clipboard. Build a
+        # compact prefix from the first few nonblank copied lines so the
+        # title is still recognized even when row 0 isn't copied as one
+        # contiguous string.
         foreach ($line in ($Text -split "`r`n|`r|`n")) {
-            $candidateTopRow = ([string]$line).Replace([string][char]0, '').TrimEnd()
+            $candidateTopRow = [regex]::Replace(([string]$line).Replace([string][char]0, ''), '[\x01-\x08\x0B\x0C\x0E-\x1F]', '').Trim()
             if (-not [string]::IsNullOrWhiteSpace($candidateTopRow)) {
-                $topRow = $candidateTopRow
-                break
+                if ([string]::IsNullOrEmpty($topRow)) { $topRow = $candidateTopRow }
+                $topLines.Add($candidateTopRow)
+                if ($topLines.Count -ge 3) { break }
             }
         }
+    }
+    $normalizedTopText = [regex]::Replace(($topLines -join ' '), '\s+', ' ').Trim()
+    $normalizedFullText = ''
+    if (-not [string]::IsNullOrEmpty($Text)) {
+        $cleanFullText = [regex]::Replace($Text.Replace([string][char]0, ''), '[\x01-\x08\x0B\x0C\x0E-\x1F]', ' ')
+        $normalizedFullText = [regex]::Replace($cleanFullText, '\s+', ' ').Trim()
     }
     if (Test-RelayTextContains -Text $topRow -Needle 'REPOSITORY LIST') { return 'REPOSITORY LIST' }
     # HOD may preserve the terminal's column spacing in copied text, so
     # the words in the centered row-0 heading can be separated by more
-    # than one space (or another whitespace character). Normalize row 0
-    # before matching the page title.
-    $normalizedTopRow = [regex]::Replace($topRow, '\s+', ' ').Trim()
-    if ($normalizedTopRow -match '(?i)REPOSITORY\s+LIST') { return 'REPOSITORY LIST' }
+    # than one space or split across clipboard lines. Match the compact
+    # prefix as well as the original first copied line.
+    if (($normalizedTopText -match '(?i)REPOSITORY\s+LIST') -or
+        ($normalizedFullText -match '(?i)REPOSITORY\s+LIST')) { return 'REPOSITORY LIST' }
     if ((Test-RelayTextContains -Text $topRow -Needle 'COMPONENT LIST') -or
         (Test-RelayTextContains -Text $topRow -Needle 'COMPONENT VERSION') -or
-        $normalizedTopRow -match '(?i)COMPONENT\s+(LIST|VERSION)') {
+        $normalizedTopText -match '(?i)COMPONENT\s+(LIST|VERSION)' -or
+        $normalizedFullText -match '(?i)COMPONENT\s+(LIST|VERSION)') {
         return 'COMPONENT LIST'
     }
-    if (Test-RelayTextContains -Text $topRow -Needle 'Menu  Utilities  Compilers  Help') { return 'SOURCE CODE' }
+    if ((Test-RelayTextContains -Text $topRow -Needle 'Menu  Utilities  Compilers  Help') -or
+        $normalizedTopText -match '(?i)MENU\s+UTILITIES\s+COMPILERS\s+HELP' -or
+        $normalizedFullText -match '(?i)MENU\s+UTILITIES\s+COMPILERS\s+HELP') { return 'SOURCE CODE' }
     return 'UNKNOWN'
 }
 
