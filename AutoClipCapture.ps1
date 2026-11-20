@@ -2,7 +2,7 @@
 =====================================================================
  AutoClipCapture.ps1
 =====================================================================
- Runs quietly in the background and listens for two GLOBAL hotkeys
+ Runs quietly in the background and listens for GLOBAL hotkeys
  (they work even while a different application is focused):
 
    [Toggle hotkey]  -> Start / stop the capture loop.
@@ -985,6 +985,19 @@ $btnSave.Add_Click({
         if ($m.Id -eq 'sql-search') { continue }   # already covered above with its live edited value
         if ($m.Enabled) {
             [void]$allHotkeys.Add([pscustomobject]@{ Name = "Mode '$($m.Name)'"; Mods = [int]$m.Hotkey.Modifiers; Key = [int]$m.Hotkey.Key })
+        }
+    }
+    foreach ($reserved in @(
+        [pscustomobject]@{ Name = 'Pause/resume'; Mods = 6; Key = 0x50 },
+        [pscustomobject]@{ Name = 'Stop automation'; Mods = 6; Key = 0x53 }
+    )) {
+        foreach ($configured in $allHotkeys) {
+            if ($configured.Mods -eq $reserved.Mods -and $configured.Key -eq $reserved.Key) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "$($configured.Name) uses a reserved hotkey for $($reserved.Name). Choose a different combination; Ctrl+Shift+P and Ctrl+Shift+S are always reserved for pause/resume and stop.",
+                    "Reserved Hotkey", 'OK', 'Warning') | Out-Null
+                return
+            }
         }
     }
     for ($i = 0; $i -lt $allHotkeys.Count; $i++) {
@@ -3216,7 +3229,7 @@ if (-not [System.IO.Path]::IsPathRooted($DefaultLogFile)) {
 $LogDir             = Split-Path -Path $DefaultLogFile -Parent
 $DefaultBaseName    = [System.IO.Path]::GetFileNameWithoutExtension($DefaultLogFile)
 
-# Auto capture current file (Ctrl+Shift+P) always saves two copies of
+# Auto capture current file (Ctrl+Shift+A in the current config) always saves two copies of
 # whatever it captures - a .txt copy in ..\txt and a .cbl copy in
 # ..\cbl - regardless of what extension (if any) the person types into
 # the filename prompt. Those are the "txt" and "cbl" folders right
@@ -3502,6 +3515,16 @@ $ExitDisplay     = [string]$Config.ExitHotkey.Display
 $ExitRequireRightModifier = ($Config.ExitHotkey.PSObject.Properties.Name -contains 'RequireRightModifier') -and [bool]$Config.ExitHotkey.RequireRightModifier
 
 $StepConfirmHotkeyId = 4   # NOT registered at startup - only while a Pipeline is actively running (see Register-PipelineStepHotkey), so Right Arrow behaves normally everywhere else
+
+# Always-available global controls, independent of which window has focus.
+$StopHotkeyId      = 7
+$StopModifiers     = 0x0002 -bor 0x0004 # MOD_CONTROL | MOD_SHIFT
+$StopKey           = 0x53              # S
+$StopDisplay       = 'Ctrl+Shift+S'
+$PauseHotkeyId     = 8
+$PauseModifiers    = 0x0002 -bor 0x0004 # MOD_CONTROL | MOD_SHIFT
+$PauseKey          = 0x50              # P
+$PauseDisplay      = 'Ctrl+Shift+P'
 
 $F3HotkeyId      = 3
 if ($Config.PSObject.Properties.Name -contains 'F3Hotkey' -and $null -ne $Config.F3Hotkey) {
@@ -3899,6 +3922,12 @@ if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ExitHotkeyId, $ExitModifiers
 }
 if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $F3HotkeyId, $F3Modifiers, $F3Key)) {
     Write-Host "Failed to register the F3 hotkey ($F3Display). It may already be in use by another app." -ForegroundColor Red
+}
+if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $StopHotkeyId, $StopModifiers, $StopKey)) {
+    Write-Host "Failed to register the STOP hotkey ($StopDisplay). It may already be in use by another app." -ForegroundColor Red
+}
+if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $PauseHotkeyId, $PauseModifiers, $PauseKey)) {
+    Write-Host "Failed to register the PAUSE hotkey ($PauseDisplay). It may already be in use by another app." -ForegroundColor Red
 }
 
 # ---- Register one global hotkey per enabled Mode. IDs start at 100 so
@@ -4703,6 +4732,7 @@ function Show-DuplicateCapturePrompt {
 # text, etc.) from however the previous session ended.
 function Stop-RelayCapture {
     $timer.Stop()
+    $global:CR_Paused            = $false
     $global:CR_Running            = $false
     $global:CR_ActiveAutomation   = $null
     $global:CR_State              = 'Idle'
@@ -4719,6 +4749,7 @@ function Stop-RelayCapture {
 # again to cancel it manually.
 function Stop-ModeCapture {
     $timer.Stop()
+    $global:CR_Paused           = $false
     $global:CR_ActiveAutomation = $null
     $global:CR_ActiveModeConfig = $null
     $global:CR_ModeState        = 'Action'
@@ -4733,6 +4764,7 @@ function Stop-ModeCapture {
 # pressed again to cancel it manually.
 function Stop-PipelineCapture {
     $timer.Stop()
+    $global:CR_Paused                = $false
     $global:CR_ActiveAutomation      = $null
     $global:CR_ActivePipelineConfig  = $null
     $global:CR_PipelineState         = 'CompScan_Action'
@@ -4804,6 +4836,8 @@ function Set-RelayForeground {
 Write-Host "AutoClipCapture is running." -ForegroundColor White
 Write-Host "  $ToggleDisplay  -> Auto capture current file (start/stop the capture loop)" -ForegroundColor White
 Write-Host "                    (click a window to target, confirm it, then name the file)"
+Write-Host "  $StopDisplay  -> stop the current automation" -ForegroundColor White
+Write-Host "  $PauseDisplay  -> pause/resume the current automation" -ForegroundColor White
 Write-Host "  $ExitDisplay  -> quit"
 Write-Host "  $F3Display  -> send a single F3 to the focused window"
 foreach ($hkId in $ModeHotkeyMap.Keys) {
@@ -4853,6 +4887,8 @@ foreach ($hkId in ($ModeHotkeyMap.Keys | Sort-Object)) {
     [void]$menuRows.Add(@([string]$m.Hotkey.Display, $menuModeText))
 }
 [void]$menuRows.Add(@([string]$ToggleDisplay, 'Auto capture current file'))
+[void]$menuRows.Add(@([string]$StopDisplay, 'Stop the current automation'))
+[void]$menuRows.Add(@([string]$PauseDisplay, 'Pause/resume the current automation'))
 foreach ($hkId in ($PipelineHotkeyMap.Keys | Sort-Object)) {
     $p = $PipelineHotkeyMap[$hkId]
     [void]$menuRows.Add(@([string]$p.Hotkey.Display, "$($p.Name) pipeline (start on the REPOSITORY LIST page)"))
@@ -4911,6 +4947,7 @@ $menuSyncTimer.Start()
 
 $global:CR_Running      = $false
 $global:CR_Selecting    = $false
+$global:CR_Paused        = $false
 $global:CR_State        = 'Idle'   # Idle -> PostCopy -> PostAction -> Idle ...
 $global:CR_ElapsedMs    = 0
 $global:CR_LogFile      = Join-Path $TxtDir ($DefaultBaseName + ".txt")
@@ -5429,6 +5466,41 @@ $hotkeyAction = {
         [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
         Write-Host "[AutoClipCapture] F3 sent to the focused window." -ForegroundColor Green
     }
+    elseif ($id -eq $StopHotkeyId) {
+        if ($global:CR_Selecting) { return }
+        if ($null -eq $global:CR_ActiveAutomation) {
+            Write-Host "[AutoClipCapture] No automation is running." -ForegroundColor DarkGray
+            return
+        }
+
+        if ($global:CR_ActiveAutomation -eq 'Relay') {
+            Stop-RelayCapture
+        } elseif ($null -ne $global:CR_ActivePipelineConfig) {
+            Stop-PipelineCapture
+        } else {
+            Stop-ModeCapture
+        }
+        Write-Host "[AutoClipCapture] STOPPED by $StopDisplay." -ForegroundColor Cyan
+    }
+    elseif ($id -eq $PauseHotkeyId) {
+        if ($global:CR_Selecting) { return }
+        if ($null -eq $global:CR_ActiveAutomation) {
+            Write-Host "[AutoClipCapture] No automation is running to pause." -ForegroundColor DarkGray
+            return
+        }
+
+        if (-not $global:CR_Paused) {
+            $timer.Stop()
+            $global:CR_Paused = $true
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : PAUSED (press $PauseDisplay to resume)" ([System.Drawing.Color]::Yellow)
+            Write-Host "[AutoClipCapture] PAUSED by $PauseDisplay. Press $PauseDisplay again to resume." -ForegroundColor Yellow
+        } else {
+            $global:CR_Paused = $false
+            $timer.Start()
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : resumed" ([System.Drawing.Color]::Lime)
+            Write-Host "[AutoClipCapture] Resumed by $PauseDisplay." -ForegroundColor Green
+        }
+    }
     elseif ($id -eq $StepConfirmHotkeyId) {
         # Only ever registered while a pipeline is running (see
         # Register-PipelineStepHotkey), and only actually does
@@ -5644,6 +5716,8 @@ $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $F3HotkeyId)     | Out-Null
+[HotkeyForm]::UnregisterHotKey($FormHandle, $StopHotkeyId)    | Out-Null
+[HotkeyForm]::UnregisterHotKey($FormHandle, $PauseHotkeyId)   | Out-Null
 Unregister-PipelineStepHotkey
 foreach ($hkId in $ModeHotkeyMap.Keys) {
     [HotkeyForm]::UnregisterHotKey($FormHandle, $hkId) | Out-Null

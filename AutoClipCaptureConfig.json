@@ -11,8 +11,8 @@
     "DupDetectThreshold":  0.995,
     "ToggleHotkey":  {
                          "Modifiers":  6,
-                         "Key":  80,
-                         "Display":  "Ctrl+Shift+P",
+                         "Key":  65,
+                         "Display":  "Ctrl+Shift+A",
                          "RequireRightModifier":  false
                      },
     "ExitHotkey":  {
