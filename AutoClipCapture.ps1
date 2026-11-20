@@ -2852,12 +2852,19 @@ function Invoke-PipelineScreen1Tick {
                 return
             }
             $global:CR_PipelineLastProcessedCobLineIndex = -1
-            $nextRow = [int]$global:CR_PipelineComponentIdx + 1
-            if ($nextRow -lt $global:CR_PipelineScreen1Rows.Count) {
+            $nextRow = -1
+            for ($candidateIndex = ([int]$global:CR_PipelineComponentIdx + 1); $candidateIndex -lt $global:CR_PipelineScreen1Rows.Count; $candidateIndex++) {
+                if ([bool]$global:CR_PipelineScreen1Rows[$candidateIndex].HasCob) {
+                    $nextRow = $candidateIndex
+                    break
+                }
+            }
+            if ($nextRow -ge 0) {
                 $global:CR_PipelineComponentIdx = $nextRow
                 $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Advancing to repository row $($nextRow + 1); checking its COB selection cell" ([System.Drawing.Color]::Lime)
+                $nextCobOrdinal = @($global:CR_PipelineScreen1Rows | Select-Object -First ($nextRow + 1) | Where-Object { $_.HasCob }).Count
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Advancing to COB row $nextCobOrdinal; checking its selection cell" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineState = 'CompZoom_Action'
                 $global:CR_ElapsedMs     = 0
             } else {
