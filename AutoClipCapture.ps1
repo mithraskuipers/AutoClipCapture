@@ -1812,8 +1812,8 @@ public static class CR_DpiAwareness {
                       $global:CR_PipelineScreen1Rows[$global:CR_PipelineComponentIdx]
                       and type the selection letter.
    CompZoom_VerifyWait/Copy - copy the REPOSITORY LIST after typing B
-                      and require B at the active row with no stale B
-                      on any other COB row before Enter.
+                      and require B at the active row; only inspect the
+                      exact previously processed COB row for stale B.
    CompZoom_Cleanup_* - click a stale B row, delete it, and recopy the
                       page to verify it is clear before continuing.
    CompZoom_Wait    - short delay before copying, so the new screen
@@ -2158,6 +2158,7 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
                 $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineLastProcessedCobLineIndex = -1
                 $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
                 $cobCount = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob }).Count
@@ -2184,13 +2185,12 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_ElapsedMs = 0
                 return
             }
-            $staleBRow = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob -and [int]$_.BCount -gt 0 } | Select-Object -First 1)
-            if ($staleBRow.Count -gt 0) {
-                $global:CR_PipelineCleanupLineIndex = [int]$staleBRow[0].LineIndex
+            if ([int]$row.BCount -gt 0) {
+                $global:CR_PipelineCleanupLineIndex = [int]$row.LineIndex
                 $global:CR_PipelineCleanupKeepCount = 0
                 $global:CR_PipelineCleanupResumeState = 'CompZoom_Action'
                 $global:CR_PipelineCleanupRetryCount = 0
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found stale B on screen row $($staleBRow[0].LineIndex); clearing it before selecting this COB row" ([System.Drawing.Color]::Yellow)
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Target COB row $($row.LineIndex) already has B; clearing it before selecting this row" ([System.Drawing.Color]::Yellow)
                 $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
                 $global:CR_ElapsedMs = 0
                 return
@@ -2364,20 +2364,22 @@ function Invoke-PipelineScreen1Tick {
                     return
                 }
 
-                $staleBRow = @($freshRows | Where-Object { $_.HasCob -and $_.LineIndex -ne $targetRow.LineIndex -and [int]$_.BCount -gt 0 } | Select-Object -First 1)
-                if ($staleBRow.Count -gt 0) {
-                    $global:CR_PipelineCleanupLineIndex = [int]$staleBRow[0].LineIndex
+                $lastProcessedLine = [int]$global:CR_PipelineLastProcessedCobLineIndex
+                $previousRow = @($freshRows | Where-Object { [int]$_.LineIndex -eq $lastProcessedLine -and $_.HasCob } | Select-Object -First 1)
+                if ($lastProcessedLine -ge 0 -and $lastProcessedLine -ne [int]$targetRow.LineIndex -and $previousRow.Count -gt 0 -and [int]$previousRow[0].BCount -gt 0) {
+                    $global:CR_PipelineCleanupLineIndex = $lastProcessedLine
                     $global:CR_PipelineCleanupKeepCount = 0
                     $global:CR_PipelineCleanupResumeState = 'CompZoom_VerifyWait'
                     $global:CR_PipelineCleanupRetryCount = 0
-                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] B is on old COB row $($staleBRow[0].LineIndex); clearing old row before Enter" ([System.Drawing.Color]::Yellow)
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Previous COB row $lastProcessedLine still has B; clearing that exact row before Enter" ([System.Drawing.Color]::Yellow)
                     $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
                     $global:CR_ElapsedMs = 0
                     return
                 }
 
                 if ([int]$targetRow.BCount -eq 1) {
-                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Verified B on target COB row $($targetRow.LineIndex); no other COB row has B. Pressing Enter next" ([System.Drawing.Color]::Lime)
+                    $global:CR_PipelineLastProcessedCobLineIndex = [int]$targetRow.LineIndex
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Verified one B on target COB row $($targetRow.LineIndex) and cleared the previous row if needed; pressing Enter next" ([System.Drawing.Color]::Lime)
                     $global:CR_PipelineState = 'CompZoom_Enter'
                     $global:CR_ElapsedMs = 0
                 } elseif ([int]$targetRow.BCount -gt 1) {
@@ -2642,17 +2644,19 @@ function Invoke-PipelineScreen1Tick {
         }
 
         'CompNext_Action' {
-            $staleBRow = @($global:CR_PipelineScreen1Rows | Where-Object { $_.HasCob -and [int]$_.BCount -gt 0 } | Select-Object -First 1)
-            if ($staleBRow.Count -gt 0) {
-                $global:CR_PipelineCleanupLineIndex = [int]$staleBRow[0].LineIndex
+            $lastProcessedLine = [int]$global:CR_PipelineLastProcessedCobLineIndex
+            $previousRow = @($global:CR_PipelineScreen1Rows | Where-Object { [int]$_.LineIndex -eq $lastProcessedLine -and $_.HasCob } | Select-Object -First 1)
+            if ($lastProcessedLine -ge 0 -and $previousRow.Count -gt 0 -and [int]$previousRow[0].BCount -gt 0) {
+                $global:CR_PipelineCleanupLineIndex = $lastProcessedLine
                 $global:CR_PipelineCleanupKeepCount = 0
                 $global:CR_PipelineCleanupResumeState = 'CompNext_Action'
                 $global:CR_PipelineCleanupRetryCount = 0
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Before advancing, found B on old COB row $($staleBRow[0].LineIndex); clearing it and verifying" ([System.Drawing.Color]::Yellow)
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Before advancing, checking previous COB row $lastProcessedLine; clearing its B before moving on" ([System.Drawing.Color]::Yellow)
                 $global:CR_PipelineState = 'CompZoom_Cleanup_Action'
                 $global:CR_ElapsedMs = 0
                 return
             }
+            $global:CR_PipelineLastProcessedCobLineIndex = -1
             $nextRow = [int]$global:CR_PipelineComponentIdx + 1
             if ($nextRow -lt $global:CR_PipelineScreen1Rows.Count) {
                 $global:CR_PipelineComponentIdx = $nextRow
@@ -2762,6 +2766,7 @@ function Invoke-PipelineScreen1Tick {
 
                 $global:CR_PipelineScreen1Rows = $nextPageRows
                 $global:CR_PipelineComponentIdx  = 0
+                $global:CR_PipelineLastProcessedCobLineIndex = -1
                 $global:CR_PipelineBWriteRetryCount = 0
                 $global:CR_PipelineFailureRowLogged = $false
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Repository page $($global:CR_PipelineScreen1PageIdx + 1): found $cobCount COB row(s) across $($global:CR_PipelineScreen1Rows.Count) row slot(s) through the last COB." -ForegroundColor DarkCyan
@@ -5008,6 +5013,7 @@ function Stop-PipelineCapture {
     $global:CR_PipelineState         = 'CompScan_Action'
     $global:CR_ElapsedMs             = 0
     $global:CR_PipelineComponentIdx  = 0
+    $global:CR_PipelineLastProcessedCobLineIndex = -1
     $global:CR_PipelineBWriteRetryCount = 0
     $global:CR_PipelineCleanupLineIndex = -1
     $global:CR_PipelineCleanupKeepCount = 0
@@ -5216,6 +5222,7 @@ $global:CR_ModeIterations   = 0
 $global:CR_ActivePipelineConfig     = $null
 $global:CR_PipelineState            = 'CompScan_Action'
 $global:CR_PipelineComponentIdx     = 0
+$global:CR_PipelineLastProcessedCobLineIndex = -1
 $global:CR_PipelineBWriteRetryCount = 0
 $global:CR_PipelineCleanupLineIndex = -1
 $global:CR_PipelineCleanupKeepCount = 0
@@ -5930,6 +5937,7 @@ $hotkeyAction = {
             $global:CR_PipelineState            = if ($useComponentList) { 'ListCapture_Start' } else { 'CompScan_Action' }
             $global:CR_ElapsedMs                = 0
             $global:CR_PipelineComponentIdx     = 0
+            $global:CR_PipelineLastProcessedCobLineIndex = -1
             $global:CR_PipelineBWriteRetryCount = 0
             $global:CR_PipelineCleanupLineIndex = -1
             $global:CR_PipelineCleanupKeepCount = 0
