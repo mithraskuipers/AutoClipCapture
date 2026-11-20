@@ -1972,6 +1972,28 @@ function Get-Screen1RowsOnPage {
     return $RowsPerPage
 }
 
+# The REPOSITORY LIST command field is a separate input area below its
+# data rows. Never let the row-selection automation continue if copied
+# screen text shows that field already contains input.
+function Assert-Screen1CommandFieldEmpty {
+    param(
+        [string]$Text,
+        [string]$PipelineName
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) { return $true }
+    $commandLine = [regex]::Match($Text, '(?im)^[ \t]*Command[ \t]*===>[ \t]*(.*)$')
+    if (-not $commandLine.Success -or [string]::IsNullOrWhiteSpace($commandLine.Groups[1].Value)) {
+        return $true
+    }
+
+    $commandText = $commandLine.Groups[1].Value.Trim()
+    Write-Host "[AutoClipCapture] [$PipelineName] REPOSITORY LIST command field is not empty ('$commandText'). Stopping before another row can be selected." -ForegroundColor Red
+    Show-RelayResultOverlay -Text "COMMAND FIELD NOT EMPTY - STOPPED" -Color ([System.Drawing.Color]::Red)
+    Stop-PipelineCapture
+    return $false
+}
+
 # Works out the on-screen (screen-coordinate) point for a COB row,
 # using the OriginX/OriginY/CharWidthPx/CharHeightPx calibration
 # CalibrateScreen1Auto.ps1 produces and the anchored row/selection
@@ -2030,11 +2052,11 @@ function Get-Screen1RowScreenPoint {
 function Invoke-Screen1RowClick {
     param([System.Drawing.Point]$ScreenPoint)
 
-    [void][Win32]::SetCursorPos($ScreenPoint.X, $ScreenPoint.Y)
-    Start-Sleep -Milliseconds 20
-    [Win32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)  # MOUSEEVENTF_LEFTDOWN
-    Start-Sleep -Milliseconds 20
-    [Win32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)  # MOUSEEVENTF_LEFTUP
+    if (-not [Win32]::SetCursorPos($ScreenPoint.X, $ScreenPoint.Y)) { return $false }
+    Start-Sleep -Milliseconds 50
+    if (-not [Win32]::ClickLeftAtCurrentCursor()) { return $false }
+    Start-Sleep -Milliseconds 75
+    return $true
 }
 
 function Invoke-PipelineScreen1Tick {
@@ -2083,6 +2105,7 @@ function Invoke-PipelineScreen1Tick {
                     Stop-PipelineCapture
                     return
                 }
+                if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
 
                 $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
                 $global:CR_PipelineScreen1PrevPageText = $text
@@ -2110,6 +2133,18 @@ function Invoke-PipelineScreen1Tick {
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] Skipping REPOSITORY LIST row slot $($rowIdx + 1) at screen row $($row.LineIndex): no COB text." -ForegroundColor DarkGray
                 $global:CR_PipelineState = 'CompNext_Action'
                 $global:CR_ElapsedMs = 0
+                return
+            }
+            $terminalRows = if ($null -ne $s1.TerminalRows) { [int]$s1.TerminalRows } else { 32 }
+            $firstDataRow = [int]$s1.FirstDataRowLineIndex
+            if ($s1.PSObject.Properties.Name -contains 'StartRowOffset' -and $null -ne $s1.StartRowOffset) {
+                $firstDataRow += [int]$s1.StartRowOffset
+            }
+            $lastDataRow = [Math]::Min(($firstDataRow + [int]$s1.RowsPerPage - 1), ($terminalRows - 1))
+            if ($row.LineIndex -lt $firstDataRow -or $row.LineIndex -gt $lastDataRow -or [string]$row.LineText -match '(?i)Command\s*===\s*>') {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Refusing to click screen row $($row.LineIndex): it is outside the calibrated REPOSITORY LIST data rows $firstDataRow-$lastDataRow, or the copied row is the command field." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "INVALID DATA ROW - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
                 return
             }
             $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
@@ -2173,7 +2208,12 @@ function Invoke-PipelineScreen1Tick {
             # HOME can focus the Show Deleted field, and DEL would erase
             # its N value. Click first, then give each key a separate
             # one-second stage so the terminal cannot merge/repeat input.
-            Invoke-Screen1RowClick -ScreenPoint $screenPt
+            if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Windows did not accept the REPOSITORY LIST mouse click; stopping before typing B." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "ROW CLICK FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
             $global:CR_PipelineState = 'CompZoom_Type'
             $global:CR_ElapsedMs     = 0
         }
@@ -2183,6 +2223,26 @@ function Invoke-PipelineScreen1Tick {
             if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable before typing B.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText)
+                    return
+                }
+                # Recompute and click again immediately before typing. A
+                # cursor move alone is not proof the emulator received the
+                # earlier click; never send B to whichever field had focus
+                # before this row was selected.
+                $rowIdx = [int]$global:CR_PipelineComponentIdx
+                $row = $global:CR_PipelineScreen1Rows[$rowIdx]
+                $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
+                if ($null -eq $pt) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Terminal geometry changed before the REPOSITORY LIST click; stopping before typing B." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "TERMINAL CALIBRATION STALE - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
+                    return
+                }
+                $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
+                if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Windows did not accept the immediate pre-type row click; stopping before typing B." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "ROW CLICK FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                    Stop-PipelineCapture
                     return
                 }
                 [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
@@ -2243,6 +2303,7 @@ function Invoke-PipelineScreen1Tick {
                     $global:CR_ElapsedMs     = 0
                 }
                 elseif ($detected -eq 1) {
+                    if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
                     $rejected = Test-RelayTextContains -Text $text -Needle ([string]$s1.InvalidCommandText)
                     $topRightChanged = Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen1PrevPageText -After $text
                     if ($rejected -or $topRightChanged) {
@@ -2323,7 +2384,12 @@ function Invoke-PipelineScreen1Tick {
                 return
             }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
-            Invoke-Screen1RowClick -ScreenPoint $screenPt
+            if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Windows did not accept the click to clear the rejected B; stopping before Delete." -ForegroundColor Red
+                Show-RelayResultOverlay -Text "ROW CLICK FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                Stop-PipelineCapture
+                return
+            }
             $global:CR_PipelineState = 'CompReject_DeleteWait'
             $global:CR_ElapsedMs = 0
         }
@@ -2422,6 +2488,7 @@ function Invoke-PipelineScreen1Tick {
                     Stop-PipelineCapture
                     return
                 }
+                if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
 
                 $isEndOfList = Test-RelayTextContains -Text $text -Needle ([string]$s1.EndOfListText)
                 $isDuplicate = $false
@@ -2614,7 +2681,11 @@ function Invoke-PipelineScreen2Tick {
                 return
             }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
-            Invoke-Screen1RowClick -ScreenPoint $screenPt
+            if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
+                $reason = 'Windows did not accept the COMPONENT VERSION source-row click.'
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
+                return
+            }
             $global:CR_PipelineState = 'EnvSelect_TypeWait'
             $global:CR_ElapsedMs = 0
         }
@@ -3502,6 +3573,45 @@ public static class Win32
 
     [DllImport("user32.dll")]
     public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct INPUTUNION
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT
+    {
+        public uint type;
+        public INPUTUNION U;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    public static bool ClickLeftAtCurrentCursor()
+    {
+        INPUT[] inputs = new INPUT[2];
+        inputs[0].type = 0;
+        inputs[0].U.mi.dwFlags = 0x0002;
+        inputs[0].U.mi.dwExtraInfo = UIntPtr.Zero;
+        inputs[1].type = 0;
+        inputs[1].U.mi.dwFlags = 0x0004;
+        inputs[1].U.mi.dwExtraInfo = UIntPtr.Zero;
+        return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))) == inputs.Length;
+    }
 
     // Used purely for diagnostics: lets the step-confirm gate print the
     // target window's actual on-screen bounds next to a computed click
@@ -4965,6 +5075,8 @@ $tickAction = {
                             Stop-PipelineCapture
                             return
                         }
+
+                        if ($expected -eq 1 -and -not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
 
                         $global:CR_PipelineState     = $global:CR_PipelineAfterBack
                         $global:CR_PipelineAfterBack = $null
