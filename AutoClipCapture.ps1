@@ -1947,74 +1947,59 @@ function Select-InitialRepositoryCobStart {
         return [pscustomobject]@{ Accepted = $true; Cancelled = $false; Reason = ''; LineIndex = -1; Name = '' }
     }
 
-    $listLines = @($candidates | ForEach-Object { '{0,2}. {1}' -f $_.Number, $_.Name })
     $dialog = New-Object System.Windows.Forms.Form
-    $dialog.Text = 'Choose the first COB component'
+    $dialog.Text = 'Click the first COB component to process'
     $dialog.StartPosition = 'CenterScreen'
     $dialog.FormBorderStyle = 'FixedDialog'
     $dialog.MaximizeBox = $false
     $dialog.MinimizeBox = $false
     $dialog.ShowInTaskbar = $false
     $dialog.TopMost = $true
-    $dialog.ClientSize = New-Object System.Drawing.Size(500, 560)
+    $dialog.ClientSize = New-Object System.Drawing.Size(520, 620)
 
     $intro = New-Object System.Windows.Forms.Label
-    $intro.Text = "Found $($candidates.Count) COB component(s) on this REPOSITORY LIST page. Enter a list number or component name to choose where processing starts:"
+    $intro.Text = "Found $($candidates.Count) COB components on this page. Click the row where processing should start:"
     $intro.Location = New-Object System.Drawing.Point(12, 12)
-    $intro.Size = New-Object System.Drawing.Size(476, 48)
+    $intro.Size = New-Object System.Drawing.Size(496, 36)
 
-    $listBox = New-Object System.Windows.Forms.TextBox
-    $listBox.Location = New-Object System.Drawing.Point(12, 66)
-    $listBox.Size = New-Object System.Drawing.Size(476, 410)
-    $listBox.Multiline = $true
-    $listBox.ReadOnly = $true
-    $listBox.ScrollBars = 'Vertical'
-    $listBox.Font = New-Object System.Drawing.Font('Consolas', 10)
-    $listBox.Text = $listLines -join [Environment]::NewLine
+    $listPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $listPanel.Location = New-Object System.Drawing.Point(12, 54)
+    $listPanel.Size = New-Object System.Drawing.Size(496, 510)
+    $listPanel.AutoScroll = $true
+    $listPanel.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
+    $listPanel.WrapContents = $false
+    $listPanel.Padding = New-Object System.Windows.Forms.Padding(4)
 
-    $choiceLabel = New-Object System.Windows.Forms.Label
-    $choiceLabel.Text = 'Start at number or component name:'
-    $choiceLabel.Location = New-Object System.Drawing.Point(12, 488)
-    $choiceLabel.Size = New-Object System.Drawing.Size(270, 22)
+    foreach ($candidate in $candidates) {
+        $componentButton = New-Object System.Windows.Forms.Button
+        $componentButton.Text = ('{0,2}.   {1}' -f $candidate.Number, $candidate.Name)
+        $componentButton.Size = New-Object System.Drawing.Size(460, 34)
+        $componentButton.Margin = New-Object System.Windows.Forms.Padding(2)
+        $componentButton.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+        $componentButton.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+        $componentButton.FlatStyle = [System.Windows.Forms.FlatStyle]::System
 
-    $choiceBox = New-Object System.Windows.Forms.TextBox
-    $choiceBox.Location = New-Object System.Drawing.Point(12, 514)
-    $choiceBox.Size = New-Object System.Drawing.Size(270, 25)
-    $choiceBox.Text = '1'
-
-    $okButton = New-Object System.Windows.Forms.Button
-    $okButton.Text = 'Start'
-    $okButton.Location = New-Object System.Drawing.Point(326, 510)
-    $okButton.Size = New-Object System.Drawing.Size(78, 30)
+        # Capture this specific row for its click handler, then close the
+        # picker immediately so one click starts processing at that row.
+        $choiceRow = $candidate
+        $currentDialog = $dialog
+        $clickHandler = {
+            $currentDialog.Tag = $choiceRow
+            $currentDialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $currentDialog.Close()
+        }.GetNewClosure()
+        $componentButton.Add_Click($clickHandler)
+        [void]$listPanel.Controls.Add($componentButton)
+    }
 
     $cancelButton = New-Object System.Windows.Forms.Button
     $cancelButton.Text = 'Cancel'
-    $cancelButton.Location = New-Object System.Drawing.Point(410, 510)
+    $cancelButton.Location = New-Object System.Drawing.Point(418, 576)
     $cancelButton.Size = New-Object System.Drawing.Size(78, 30)
     $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
 
-    $dialog.Controls.AddRange(@($intro, $listBox, $choiceLabel, $choiceBox, $okButton, $cancelButton))
-    $dialog.AcceptButton = $okButton
+    $dialog.Controls.AddRange(@($intro, $listPanel, $cancelButton))
     $dialog.CancelButton = $cancelButton
-    $dialog.Add_Shown({ $choiceBox.Focus(); $choiceBox.SelectAll() })
-    $okButton.Add_Click({
-        $typedChoice = $choiceBox.Text.Trim()
-        $chosen = $null
-        $number = 0
-        if ([int]::TryParse($typedChoice, [ref]$number)) {
-            if ($number -ge 1 -and $number -le $candidates.Count) { $chosen = $candidates[$number - 1] }
-        } else {
-            $nameMatches = @($candidates | Where-Object { [string]::Equals([string]$_.Name, $typedChoice, [System.StringComparison]::OrdinalIgnoreCase) })
-            if ($nameMatches.Count -eq 1) { $chosen = $nameMatches[0] }
-        }
-        if ($null -eq $chosen) {
-            [void][System.Windows.Forms.MessageBox]::Show($dialog, 'Enter a listed number or a unique component name. If names repeat, choose the numbered entry.', 'Invalid component', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            return
-        }
-        $dialog.Tag = $chosen
-        $dialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $dialog.Close()
-    })
 
     $dialogResult = $dialog.ShowDialog()
     $chosenRow = $dialog.Tag
