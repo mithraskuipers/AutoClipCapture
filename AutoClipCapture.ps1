@@ -5394,7 +5394,60 @@ $tickAction = {
                         Stop-PipelineCapture
                         return
                     }
-                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Returning ($F3Display)" ([System.Drawing.Color]::Orange)
+                    # Never trust the remembered page before F3. Copy the
+                    # live terminal now and let Back_PrecheckCopy refuse
+                    # the key if the page is already REPOSITORY LIST (or
+                    # cannot be identified).
+                    try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
+                    [System.Windows.Forms.SendKeys]::SendWait('^c')
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Checking the live page before allowing F3" ([System.Drawing.Color]::Lime)
+                    $global:CR_PipelineState = 'Back_PrecheckWait'
+                    $global:CR_ElapsedMs = 0
+                }
+                'Back_PrecheckWait' {
+                    $global:CR_ElapsedMs += $TimerTickMs
+                    $precheckDelayMs = switch ([int]$global:CR_PipelineCurrentScreen) {
+                        3 { [int]$PipelineTimingsMs.SourceCode.AfterClipboardCopyMs }
+                        2 { [int]$PipelineTimingsMs.ComponentVersion.AfterClipboardCopyMs }
+                        default { [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs }
+                    }
+                    if ($global:CR_ElapsedMs -ge $precheckDelayMs) {
+                        $global:CR_PipelineState = 'Back_PrecheckCopy'
+                        $global:CR_ElapsedMs = 0
+                    }
+                }
+                'Back_PrecheckCopy' {
+                    $text = ''
+                    try {
+                        if ([System.Windows.Forms.Clipboard]::ContainsText()) { $text = [System.Windows.Forms.Clipboard]::GetText() }
+                    } catch {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Clipboard read failed during the pre-F3 page check: $_" -ForegroundColor Yellow
+                    }
+                    $liveScreen = Update-PipelineScreenTracking -Text $text -PipelineName $pipeline.Name
+                    if ($liveScreen -eq 1) {
+                        if ($global:CR_PipelineAfterBack -eq 'CompNext_Action') {
+                            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Already on REPOSITORY LIST; F3 blocked and returning to the repository loop" ([System.Drawing.Color]::Yellow)
+                            $global:CR_PipelineState = 'Back_Copy'
+                            $global:CR_ElapsedMs = [int]$PipelineTimingsMs.RepositoryList.AfterClipboardCopyMs
+                        } else {
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] F3 blocked: live page check found REPOSITORY LIST, where F3 is forbidden. Stopping safely." -ForegroundColor Red
+                            Show-RelayResultOverlay -Text "F3 BLOCKED ON REPOSITORY LIST" -Color ([System.Drawing.Color]::Red)
+                            Stop-PipelineCapture
+                        }
+                        return
+                    }
+                    if ($liveScreen -notin @(2, 3)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] F3 blocked: the live page could not be identified, so it is unsafe to press F3." -ForegroundColor Red
+                        Show-RelayResultOverlay -Text "F3 BLOCKED - PAGE UNKNOWN" -Color ([System.Drawing.Color]::Red)
+                        Stop-PipelineCapture
+                        return
+                    }
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Target window disappeared after the pre-F3 page check; F3 was not sent." -ForegroundColor Red
+                        Stop-PipelineCapture
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Live page is $(Get-PipelineScreenNameFromNumber -ScreenNumber $liveScreen); sending F3" ([System.Drawing.Color]::Orange)
                     [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
                     $global:CR_PipelineState = 'Back_Wait'
                     $global:CR_ElapsedMs = 0
@@ -5820,8 +5873,33 @@ $hotkeyAction = {
             Write-Host "[AutoClipCapture] Can't send F3 - '$busyName' is currently running." -ForegroundColor Yellow
             return
         }
-        # No window selection - simply assume the currently focused
-        # window is the intended target and send F3 straight to it.
+        # On Host On-Demand, identify the live page before sending F3.
+        # REPOSITORY LIST is an absolute no-F3 page; unknown pages fail
+        # closed too. Other focused apps keep the original direct F3 use.
+        $fgHandle = [Win32]::GetForegroundWindow()
+        $fgTitleBuilder = New-Object System.Text.StringBuilder 256
+        if ($fgHandle -ne [IntPtr]::Zero) { [void][Win32]::GetWindowText($fgHandle, $fgTitleBuilder, $fgTitleBuilder.Capacity) }
+        $fgTitle = $fgTitleBuilder.ToString()
+        if ($fgTitle.StartsWith('3270-display(32 regels)', [System.StringComparison]::OrdinalIgnoreCase)) {
+            try { [System.Windows.Forms.Clipboard]::Clear() } catch {}
+            [System.Windows.Forms.SendKeys]::SendWait('^c')
+            Start-Sleep -Milliseconds ([Math]::Max(150, [int]$PipelineTimingsMs.ComponentVersion.AfterClipboardCopyMs))
+            $pageText = ''
+            try {
+                if ([System.Windows.Forms.Clipboard]::ContainsText()) { $pageText = [System.Windows.Forms.Clipboard]::GetText() }
+            } catch {
+                Write-Host "[AutoClipCapture] Could not read Host On-Demand page before manual F3: $_" -ForegroundColor Yellow
+            }
+            $pageNumber = Get-PipelineScreenNumber -Text $pageText
+            if ($pageNumber -eq 1) {
+                Write-Host "[AutoClipCapture] F3 blocked: the focused Host On-Demand page is REPOSITORY LIST, where F3 is forbidden." -ForegroundColor Red
+                return
+            }
+            if ($pageNumber -notin @(2, 3)) {
+                Write-Host "[AutoClipCapture] F3 blocked: the focused Host On-Demand page could not be identified safely." -ForegroundColor Red
+                return
+            }
+        }
         [System.Windows.Forms.SendKeys]::SendWait($F3ActionKeyToken)
         Write-Host "[AutoClipCapture] F3 sent to the focused window." -ForegroundColor Green
     }
