@@ -2082,9 +2082,14 @@ function Skip-PipelineRowAfterFailure {
     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Row $rowNumber failed; returning to REPOSITORY LIST and continuing" ([System.Drawing.Color]::Orange)
 }
 
-# Keep a dedicated, append-only list of COMPONENT LIST rows rejected by
+# Keep a dedicated, append-only list of COMPONENT VERSION rows rejected by
 # the mainframe as unavailable, tied back to their repository component.
 function Add-ComponentUnavailableNote {
+    param(
+        [string]$Environment = '',
+        [int]$AttemptNumber = 0
+    )
+
     $rowIndex = [int]$global:CR_PipelineComponentIdx
     $row = if ($rowIndex -ge 0 -and $rowIndex -lt $global:CR_PipelineScreen1Rows.Count) { $global:CR_PipelineScreen1Rows[$rowIndex] } else { $null }
     $componentName = if ($null -ne $row -and $row.PSObject.Properties.Name -contains 'ComponentName') { [string]$row.ComponentName } else { '' }
@@ -2102,7 +2107,7 @@ function Add-ComponentUnavailableNote {
         RepositoryPage = [int]$global:CR_PipelineScreen1PageIdx + 1
         ComponentName = $componentName
         RepositoryRow = $repositoryRow
-        ErrorText = 'Component unavailable'
+        ErrorText = if ([string]::IsNullOrWhiteSpace($Environment)) { 'Component unavailable' } else { "Component unavailable ($Environment, attempt $AttemptNumber)" }
     }
     try {
         if (Test-Path -LiteralPath $notePath) {
@@ -2781,6 +2786,8 @@ function Invoke-PipelineScreen1Tick {
                     $global:CR_PipelineScreen2CapturedText = $text
                     $global:CR_PipelineScreen2BeforeSelectionText = $text
                     $global:CR_PipelineSourceSelectionSent = $false
+                    $global:CR_PipelineSourceCandidateIdx = 0
+                    $global:CR_PipelineSourceCandidates = @()
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found COMPONENT VERSION after Enter" ([System.Drawing.Color]::Lime)
                     $global:CR_PipelineState = 'EnvLog_Action'
                     $global:CR_ElapsedMs     = 0
@@ -3026,17 +3033,20 @@ function Invoke-PipelineScreen1Tick {
 =====================================================================
  AutoClipCaptureSqlPipelineScreen2.ps1
 
- Screen 2 = COMPONENT VERSION. Log the page and find the topmost
- PROD/UT/ET marker in copied text. Check the selection cell two columns
- to its left: if it already contains S, press Enter without typing;
- otherwise type one S, then press Enter. Clipboard line indices are
+ Screen 2 = COMPONENT VERSION. Log the page and try PROD/UT/ET markers
+ in top-to-bottom order. If the mainframe reports Component unavailable,
+ log that candidate and try the next environment row before returning to
+ the repository. Check the selection cell two columns to the left: if it
+ already contains S, press Enter without typing; otherwise type one S,
+ then press Enter. Clipboard line indices are
  not treated as screen rows. Only after Screen 3's source-code menu is
  verified on row 0 does the shared F3 state return to Screen 1.
 
  States (start with "Env" so AutoClipCapture.ps1 routes them here):
    EnvLog_Action     - log the captured COMPONENT VERSION page.
-   EnvSelect_Action  - locate the topmost PROD/UT/ET marker in copied
-                       text and check its selection cell on screen row 8.
+   EnvSelect_Action  - locate the current PROD/UT/ET marker in copied
+                       text and check its row-specific selection cell,
+                       anchored to screen row 8 for the top candidate.
    EnvSelect_TypeWait - only if needed, wait and type one S.
    EnvSelect_EnterWait - wait and press Enter, with or without typing S.
    EnvSelect_Wait    - wait for the source-code screen to render.
@@ -3073,12 +3083,12 @@ function Invoke-PipelineScreen2Tick {
 
         'EnvSelect_Action' {
             $componentText = [string]$global:CR_PipelineScreen2CapturedText
-            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing COMPONENT VERSION page for the topmost PROD, UT, or ET row" ([System.Drawing.Color]::Lime)
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing COMPONENT VERSION page for PROD, UT, or ET rows" ([System.Drawing.Color]::Lime)
             $componentLines = @($componentText -split "`r`n|`r|`n")
             # Clipboard line positions are not screen row positions: some
             # terminal copies omit leading blank rows or headers. Find the
-            # source marker as a column clue, but always target known screen
-            # row 8 using calibrated screen geometry.
+            # source marker as a column clue, anchor its topmost row at
+            # screen row 8, and map later candidates by their line offset.
             $sourceCandidates = @()
             for ($lineIndex = 0; $lineIndex -lt $componentLines.Count; $lineIndex++) {
                 $matches = [regex]::Matches($componentLines[$lineIndex], '\b(?:PROD|UT|ET)\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
@@ -3099,23 +3109,33 @@ function Invoke-PipelineScreen2Tick {
             }
 
             # Clipboard line order preserves top-to-bottom screen order.
-            # Sort explicitly so the first matching environment row wins.
+            # Keep the rows ordered so an unavailable top choice can be
+            # retried against the next PROD/UT/ET entry on this page.
             $sourceCandidates = @($sourceCandidates | Sort-Object LineIndex, @{ Expression = { $_.Match.Index } })
-            if ($sourceCandidates.Count -gt 1) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Found $($sourceCandidates.Count) PROD/UT/ET rows; selecting the topmost marker '$($sourceCandidates[0].Match.Value)' and continuing." -ForegroundColor DarkCyan
+            $global:CR_PipelineSourceCandidates = @($sourceCandidates)
+            $candidateIndex = [int]$global:CR_PipelineSourceCandidateIdx
+            if ($candidateIndex -lt 0 -or $candidateIndex -ge $sourceCandidates.Count) {
+                $reason = 'No remaining PROD, UT, or ET rows are available to try on COMPONENT VERSION.'
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
+                return
             }
-            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found $($sourceCandidates.Count) PROD/UT/ET marker(s); using topmost $($sourceCandidates[0].Match.Value)" ([System.Drawing.Color]::Lime)
-            $sourceMatch = $sourceCandidates[0].Match
+            if ($sourceCandidates.Count -gt 1) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Found $($sourceCandidates.Count) PROD/UT/ET rows; trying row $($candidateIndex + 1) of $($sourceCandidates.Count), marker '$($sourceCandidates[$candidateIndex].Match.Value)'." -ForegroundColor DarkCyan
+            }
+            $selectedSourceCandidate = $sourceCandidates[$candidateIndex]
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Trying environment row $($candidateIndex + 1) of $($sourceCandidates.Count): $($selectedSourceCandidate.Match.Value)" ([System.Drawing.Color]::Lime)
+            $sourceMatch = $selectedSourceCandidate.Match
             $sourceCol = $sourceMatch.Index - 2
-            $sourceRow = 8
+            $sourceRow = 8 + ([int]$selectedSourceCandidate.LineIndex - [int]$sourceCandidates[0].LineIndex)
             if ($sourceCol -lt 0 -or $sourceCol -ge [int]$s1.TerminalColumns) {
-                $reason = "Selection column two characters left of $($sourceMatch.Value) on COMPONENT VERSION row 8 is outside the terminal grid."
+                $reason = "Selection column two characters left of $($sourceMatch.Value) on COMPONENT VERSION row $sourceRow is outside the terminal grid."
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
                 Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
 
-            $sourceLine = [string]$sourceCandidates[0].Line
+            $sourceLine = [string]$selectedSourceCandidate.Line
             $leftOfMarker = $sourceLine.Substring(0, [Math]::Min($sourceMatch.Index, $sourceLine.Length))
             $existingSelections = [regex]::Matches(
                 $leftOfMarker,
@@ -3123,13 +3143,13 @@ function Invoke-PipelineScreen2Tick {
                 [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
             )
             if ($existingSelections.Count -gt 1) {
-                $reason = "COMPONENT VERSION row 8 has more than one standalone S before $($sourceMatch.Value); skipped to avoid submitting an invalid command."
+                $reason = "COMPONENT VERSION row $sourceRow has more than one standalone S before $($sourceMatch.Value); skipped to avoid submitting an invalid command."
                 Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
                 Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
             if ($existingSelections.Count -eq 1) {
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row 8 already has S before $($sourceMatch.Value); skipping S and pressing Enter only." -ForegroundColor DarkGray
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] COMPONENT VERSION row $sourceRow already has S before $($sourceMatch.Value); skipping S and pressing Enter only." -ForegroundColor DarkGray
                 Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found existing S before $($sourceMatch.Value); checking source page with Enter" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineSourceSelectionSent = $true
                 $global:CR_PipelineState = 'EnvSelect_EnterWait'
@@ -3145,7 +3165,7 @@ function Invoke-PipelineScreen2Tick {
                 return
             }
             $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
-            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION row 8, marker $($sourceMatch.Value) - about to click two columns left, type S + Enter"
+            $desc = "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] COMPONENT VERSION row $sourceRow, marker $($sourceMatch.Value) - about to click two columns left, type S + Enter"
             if (Request-PipelineStepConfirm -Description $desc -MarkerPoint $screenPt) { return }
 
             if ([int]$PipelineTimingsMs.ComponentVersion.BeforeClickMs -gt 0) {
@@ -3169,7 +3189,7 @@ function Invoke-PipelineScreen2Tick {
                 Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $componentText
                 return
             }
-            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Clicked COMPONENT VERSION row 8 selection cell for $($sourceMatch.Value)" ([System.Drawing.Color]::Lime)
+            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Clicked COMPONENT VERSION row $sourceRow selection cell for $($sourceMatch.Value)" ([System.Drawing.Color]::Lime)
             $global:CR_PipelineState = 'EnvSelect_TypeWait'
             $global:CR_ElapsedMs = 0
         }
@@ -3245,9 +3265,26 @@ function Invoke-PipelineScreen2Tick {
                 $componentUnavailable = ($detected -eq 2) -and (Test-RelayTextContains -Text $sourceText -Needle 'Component unavailable')
                 if ($detected -eq 2 -and ($componentCommandError -or $componentUnavailable)) {
                     if ($componentUnavailable) {
-                        $unavailableComponent = Add-ComponentUnavailableNote
-                        $reason = "COMPONENT VERSION reported 'Component unavailable' for repository component '$unavailableComponent' after S/Enter."
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Recorded unavailable component '$unavailableComponent'; returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                        $candidateIndex = [int]$global:CR_PipelineSourceCandidateIdx
+                        $environmentName = ''
+                        if ($candidateIndex -ge 0 -and $candidateIndex -lt $global:CR_PipelineSourceCandidates.Count) {
+                            $environmentName = [string]$global:CR_PipelineSourceCandidates[$candidateIndex].Match.Value
+                        }
+                        $unavailableComponent = Add-ComponentUnavailableNote -Environment $environmentName -AttemptNumber ($candidateIndex + 1)
+                        $nextCandidateIndex = $candidateIndex + 1
+                        if ($nextCandidateIndex -lt $global:CR_PipelineSourceCandidates.Count) {
+                            $nextEnvironment = [string]$global:CR_PipelineSourceCandidates[$nextCandidateIndex].Match.Value
+                            Write-Host "[AutoClipCapture] [$($pipeline.Name)] '$environmentName' is unavailable for '$unavailableComponent'; trying next environment '$nextEnvironment' on this COMPONENT VERSION page." -ForegroundColor Yellow
+                            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] $environmentName unavailable for $unavailableComponent; trying $nextEnvironment" ([System.Drawing.Color]::Yellow)
+                            $global:CR_PipelineSourceCandidateIdx = $nextCandidateIndex
+                            $global:CR_PipelineSourceSelectionSent = $false
+                            $global:CR_PipelineScreen2BeforeSelectionText = $sourceText
+                            $global:CR_PipelineState = 'EnvSelect_Action'
+                            $global:CR_ElapsedMs = 0
+                            return
+                        }
+                        $reason = "COMPONENT VERSION reported 'Component unavailable' for repository component '$unavailableComponent' on its final candidate '$environmentName'. No PROD/UT/ET alternatives remain."
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
                     } else {
                         $reason = 'COMPONENT VERSION top-right error message changed after S/Enter.'
                     }
@@ -5376,6 +5413,8 @@ function Stop-PipelineCapture {
     $global:CR_PipelineScreen2CapturedText = $null
     $global:CR_PipelineScreen2BeforeSelectionText = $null
     $global:CR_PipelineSourceSelectionSent = $false
+    $global:CR_PipelineSourceCandidateIdx = 0
+    $global:CR_PipelineSourceCandidates = @()
     $global:CR_PipelineSourceCaptureText = $null
     $global:CR_PipelineSourceCapturePreviousText = $null
     $global:CR_PipelineSourceLogFile = $null
@@ -5599,6 +5638,8 @@ $global:CR_PipelineScreen1Rows         = @()   # row slots through last COB: @{ 
 $global:CR_PipelineScreen2CapturedText = $null # text captured right after landing on Screen 2, handed to Screen2.ps1 for logging
 $global:CR_PipelineScreen2BeforeSelectionText = $null # baseline for detecting an in-place S/Enter error banner
 $global:CR_PipelineSourceSelectionSent = $false # enforce at most one S per COMPONENT VERSION page
+$global:CR_PipelineSourceCandidateIdx = 0
+$global:CR_PipelineSourceCandidates = @()
 $global:CR_PipelineSourceCaptureText = $null
 $global:CR_PipelineSourceCapturePreviousText = $null
 $global:CR_PipelineSourceLogFile = $null
@@ -6391,6 +6432,8 @@ $hotkeyAction = {
             $global:CR_PipelineScreen1RetryCount   = 0
             $global:CR_PipelineScreen1Rows          = @()
             $global:CR_PipelineScreen2CapturedText = $null
+            $global:CR_PipelineSourceCandidateIdx = 0
+            $global:CR_PipelineSourceCandidates = @()
             $global:CR_PipelineStepPending     = $false
             $global:CR_PipelineStepConfirmed   = $false
             $global:CR_PipelineStepDescription = ''
