@@ -2085,6 +2085,41 @@ function Skip-PipelineRowAfterFailure {
     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Row $rowNumber failed; returning to REPOSITORY LIST and continuing" ([System.Drawing.Color]::Orange)
 }
 
+# Keep a dedicated, append-only list of COMPONENT LIST rows rejected by
+# the mainframe as unavailable, tied back to their repository component.
+function Add-ComponentUnavailableNote {
+    $rowIndex = [int]$global:CR_PipelineComponentIdx
+    $row = if ($rowIndex -ge 0 -and $rowIndex -lt $global:CR_PipelineScreen1Rows.Count) { $global:CR_PipelineScreen1Rows[$rowIndex] } else { $null }
+    $componentName = if ($null -ne $row -and $row.PSObject.Properties.Name -contains 'ComponentName') { [string]$row.ComponentName } else { '' }
+    $repositoryRow = if ($null -ne $row -and $row.PSObject.Properties.Name -contains 'LineText') { [string]$row.LineText } else { '' }
+    if ([string]::IsNullOrWhiteSpace($componentName) -and -not [string]::IsNullOrWhiteSpace($repositoryRow)) {
+        $nameMatch = [regex]::Match($repositoryRow, '\bCOB\b\s+(?<name>[A-Za-z0-9@#$._-]+)(?=\s|$)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($nameMatch.Success) { $componentName = [string]$nameMatch.Groups['name'].Value }
+    }
+    if ([string]::IsNullOrWhiteSpace($componentName)) { $componentName = '[unknown]' }
+
+    $notePath = Join-Path $LogDir 'component_unavailable.csv'
+    $note = [pscustomobject][ordered]@{
+        Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Pipeline = [string]$global:CR_ActivePipelineConfig.Name
+        RepositoryPage = [int]$global:CR_PipelineScreen1PageIdx + 1
+        ComponentName = $componentName
+        RepositoryRow = $repositoryRow
+        ErrorText = 'Component unavailable'
+    }
+    try {
+        if (Test-Path -LiteralPath $notePath) {
+            $note | Export-Csv -Path $notePath -NoTypeInformation -Encoding UTF8 -Append
+        } else {
+            $note | Export-Csv -Path $notePath -NoTypeInformation -Encoding UTF8
+        }
+        Write-Host "[AutoClipCapture] [$($global:CR_ActivePipelineConfig.Name)] Recorded Component unavailable for '$componentName' in $notePath" -ForegroundColor Yellow
+    } catch {
+        Write-Host "[AutoClipCapture] Could not record Component unavailable for '$componentName' in '$notePath': $_" -ForegroundColor Red
+    }
+    return $componentName
+}
+
 # REPOSITORY LIST shows its own "Row <first> of <total>" indicator
 # (top-right of the panel). This works out how many real data rows are
 # on the CURRENT page from that indicator, so the last page of a list -
@@ -3197,8 +3232,15 @@ function Invoke-PipelineScreen2Tick {
 
                 $detected = Update-PipelineScreenTracking -Text $sourceText -PipelineName $pipeline.Name
                 $componentCommandError = ($detected -eq 2) -and (Test-PipelineTopRightChanged -Before $global:CR_PipelineScreen2BeforeSelectionText -After $sourceText)
-                if ($detected -eq 2 -and $componentCommandError) {
-                    $reason = 'COMPONENT VERSION top-right error message changed after S/Enter.'
+                $componentUnavailable = ($detected -eq 2) -and (Test-RelayTextContains -Text $sourceText -Needle 'Component unavailable')
+                if ($detected -eq 2 -and ($componentCommandError -or $componentUnavailable)) {
+                    if ($componentUnavailable) {
+                        $unavailableComponent = Add-ComponentUnavailableNote
+                        $reason = "COMPONENT VERSION reported 'Component unavailable' for repository component '$unavailableComponent' after S/Enter."
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Recorded unavailable component '$unavailableComponent'; returning to REPOSITORY LIST and continuing." -ForegroundColor Yellow
+                    } else {
+                        $reason = 'COMPONENT VERSION top-right error message changed after S/Enter.'
+                    }
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] SOURCE CODE not found; COMPONENT VERSION shows an error" ([System.Drawing.Color]::Yellow)
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
                     Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $sourceText
@@ -3247,8 +3289,9 @@ function Invoke-PipelineScreen2Tick {
  text "Menu  Utilities  Compilers  Help". Once verified, run the same
  capture loop as Auto Capture Current File: append filtered screens to
  the component's .txt/.cbl files, send the configured action key (F8 by
- default), and stop when the captured screen repeats. Only then queue
- the single F3 return to Screen 1. Unexpected Sql_* states fail safely.
+ default), and stop only when copied text contains "Bottom of data".
+ Only then queue the single F3 return to Screen 1. Unexpected Sql_*
+ states fail safely.
 =====================================================================
 #>
 
@@ -3306,21 +3349,15 @@ function Invoke-PipelineScreen3Tick {
                 return
             }
 
-            # The Auto Capture Current File loop ends when paging no
-            # longer produces new text. Don't append the repeated final
-            # screen; treat it as end-of-file and only then return with F3.
+            # Only the mainframe's explicit Bottom of data marker ends
+            # source capture. Repeated text without that marker is not
+            # proof of end-of-file; keep paging, but don't append duplicate
+            # content to the output files.
+            $reachedBottom = Test-RelayTextContains -Text $text -Needle 'Bottom of data'
+            $repeatedPage = $false
             if ($null -ne $global:CR_PipelineSourceCapturePreviousText) {
                 $similarity = Get-TextSimilarity -A $global:CR_PipelineSourceCapturePreviousText -B $text
-                if ($similarity -ge $DupDetectThreshold) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Auto Capture Current File complete after $($global:CR_PipelineSourceCapturePages) page(s); the next F8 screen repeated the previous page." -ForegroundColor Green
-                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found repeated source page; capture is complete, returning with F3" ([System.Drawing.Color]::Lime)
-                    Show-RelayResultOverlay -Text "SOURCE CAPTURE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen) -TopRight
-                    $global:CR_PipelineScreen1RetryCount = 0
-                    $global:CR_PipelineAfterBack = 'CompNext_Action'
-                    $global:CR_PipelineState = 'Back_Action'
-                    $global:CR_ElapsedMs = 0
-                    return
-                }
+                $repeatedPage = ($similarity -ge $DupDetectThreshold)
             }
 
             if ($global:CR_PipelineSourceCapturePages -ge 10000) {
@@ -3331,22 +3368,41 @@ function Invoke-PipelineScreen3Tick {
             }
 
             $filtered = Get-FilteredCaptureText -Text $text -SkipStart $SkipRowsStart -SkipEnd $SkipRowsEnd
-            try {
-                if (-not [string]::IsNullOrEmpty($filtered)) {
-                    Add-Content -Path $global:CR_PipelineSourceLogFile -Value $filtered
-                    Add-Content -Path $global:CR_PipelineSourceLogFileCbl -Value $filtered
+            if ($repeatedPage -and -not $reachedBottom) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] The copied source page repeated without a Bottom of data marker; skipping duplicate output and continuing to page." -ForegroundColor Yellow
+            } else {
+                try {
+                    if (-not [string]::IsNullOrEmpty($filtered)) {
+                        Add-Content -Path $global:CR_PipelineSourceLogFile -Value $filtered
+                        Add-Content -Path $global:CR_PipelineSourceLogFileCbl -Value $filtered
+                    }
+                } catch {
+                    $reason = "Failed to save Auto Capture Current File output: $_"
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
+                    Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
+                    return
                 }
-            } catch {
-                $reason = "Failed to save Auto Capture Current File output: $_"
-                Write-Host "[AutoClipCapture] [$($pipeline.Name)] $reason Logging the row and returning to REPOSITORY LIST." -ForegroundColor Yellow
-                Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text
-                return
             }
 
             $global:CR_PipelineSourceCapturePreviousText = $text
             $global:CR_PipelineSourceCapturePages++
-            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Saved source page $($global:CR_PipelineSourceCapturePages)." -ForegroundColor DarkCyan
-            Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Saved source capture page $($global:CR_PipelineSourceCapturePages)" ([System.Drawing.Color]::Lime)
+            Write-Host "[AutoClipCapture] [$($pipeline.Name)] Analyzed source page $($global:CR_PipelineSourceCapturePages)." -ForegroundColor DarkCyan
+            if (-not $reachedBottom -and -not $repeatedPage) {
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Saved source capture page $($global:CR_PipelineSourceCapturePages)" ([System.Drawing.Color]::Lime)
+            }
+            if ($reachedBottom) {
+                Write-Host "[AutoClipCapture] [$($pipeline.Name)] Found 'Bottom of data' after analyzing source page $($global:CR_PipelineSourceCapturePages); returning with F3." -ForegroundColor Green
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Found Bottom of data; source capture complete, returning with F3" ([System.Drawing.Color]::Lime)
+                Show-RelayResultOverlay -Text "SOURCE CAPTURE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen) -TopRight
+                $global:CR_PipelineScreen1RetryCount = 0
+                $global:CR_PipelineAfterBack = 'CompNext_Action'
+                $global:CR_PipelineState = 'Back_Action'
+                $global:CR_ElapsedMs = 0
+                return
+            }
+            if ($repeatedPage) {
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Page repeated without Bottom of data; continuing to page" ([System.Drawing.Color]::Yellow)
+            }
             $global:CR_PipelineState = 'SrcCapture_Action'
             $global:CR_ElapsedMs = 0
         }
