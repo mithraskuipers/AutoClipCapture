@@ -4823,7 +4823,16 @@ function Get-PipelineScreenName {
 
     $topRow = ''
     if (-not [string]::IsNullOrEmpty($Text)) {
-        $topRow = ($Text -split "`r`n|`r|`n", 2)[0]
+        # Some HOD clipboard copies begin with blank lines even though
+        # the terminal's row 0 is visible. Skip only those leading blank
+        # clipboard lines, then identify the page from row 0's text.
+        foreach ($line in ($Text -split "`r`n|`r|`n")) {
+            $candidateTopRow = ([string]$line).Replace([string][char]0, '').TrimEnd()
+            if (-not [string]::IsNullOrWhiteSpace($candidateTopRow)) {
+                $topRow = $candidateTopRow
+                break
+            }
+        }
     }
     if (Test-RelayTextContains -Text $topRow -Needle 'REPOSITORY LIST') { return 'REPOSITORY LIST' }
     if ((Test-RelayTextContains -Text $topRow -Needle 'COMPONENT LIST') -or
