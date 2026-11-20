@@ -1796,14 +1796,12 @@ public static class CR_DpiAwareness {
       run Auto Capture Current File through the end of source, then
       press F3 and verify REPOSITORY LIST returned.
    4. Only after that verified return, continue to the next COB row.
-   5. When the last COB row on the page is processed, show a centered
-      page-complete message, then press Screen1Select.PageNextToken
-      (F8 by default) and continue until Screen1Select.EndOfListText
-      shows up (explicit "end of list"
-      marker) or a freshly-paged screen comes back near-identical to
-      the one before it (Screen1Select.DupDetectThreshold - same
-      comparison the duplicate-capture protection elsewhere uses),
-      which means paging further isn't revealing anything new either.
+   5. When the last COB row on a nonfinal page is processed, show a
+      centered page-complete message and press Screen1Select.PageNextToken
+      (F8 by default). When Screen1Select.EndOfListText appears, process
+      every COB row on that final page, then stop without another F8.
+      A freshly-paged duplicate page without the marker still ends safely
+      because it contains no new list data.
 
  States (all start with "Comp" so AutoClipCapture.ps1's tick switch
  routes them here):
@@ -1834,11 +1832,10 @@ public static class CR_DpiAwareness {
    CompPage_Action  - send Screen1Select.PageNextToken (e.g. F8) to
                       move to the next page.
    CompPage_Wait    - short delay before copying the new page.
-   CompPage_Copy    - Ctrl+C, check EndOfListText / duplicate-page
-                      (still genuinely needs the page's text - that's
-                      the one place content is still read, purely to
-                      know when to STOP paging); either stop or build
-                      a new COB row list anchored to screen row 6.
+   CompPage_Copy    - Ctrl+C, check EndOfListText / duplicate-page; mark
+                      an EndOfListText page as final and build its COB
+                      row list anchored to screen row 6. The final page
+                      is processed fully before stopping without F8.
 
  $global:CR_PipelineComponentIdx is the 0-based index into the current
  page's row list through its last COB row. It is reset by AutoClipCapture.ps1 whenever the
@@ -2293,6 +2290,7 @@ function Invoke-PipelineScreen1Tick {
                 if (-not (Assert-Screen1CommandFieldEmpty -Text $text -PipelineName $pipeline.Name)) { return }
 
                 Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Analyzing REPOSITORY LIST page $($global:CR_PipelineScreen1PageIdx + 1); looking for COB rows" ([System.Drawing.Color]::Lime)
+                $global:CR_PipelineScreen1IsLastPage = Test-RelayTextContains -Text $text -Needle ([string]$s1.EndOfListText)
                 $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $global:CR_PipelineScreen1Rows   = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
@@ -2888,6 +2886,13 @@ function Invoke-PipelineScreen1Tick {
                 $global:CR_PipelineState = 'CompZoom_Action'
                 $global:CR_ElapsedMs     = 0
             } else {
+                if ([bool]$global:CR_PipelineScreen1IsLastPage) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Finished every COB row on the final REPOSITORY LIST page; Bottom of List is present, so no F8 is needed." -ForegroundColor Green
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Final REPOSITORY LIST page processed; complete" ([System.Drawing.Color]::Lime)
+                    Show-RelayResultOverlay -Text "ALL REPOSITORY LIST PAGES PROCESSED" -Color ([System.Drawing.Color]::LimeGreen)
+                    Stop-PipelineCapture
+                    return
+                }
                 # Every COB row on this page has been processed. Put a
                 # clear centered message on screen before paging forward.
                 Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] All COB rows on page $($global:CR_PipelineScreen1PageIdx + 1) verified; preparing F8" ([System.Drawing.Color]::Lime)
@@ -2963,18 +2968,23 @@ function Invoke-PipelineScreen1Tick {
                     $isDuplicate = ($similarity -ge [double]$s1.DupDetectThreshold)
                 }
 
-                if ($isEndOfList -or $isDuplicate) {
-                    $reason = if ($isEndOfList) { "'$($s1.EndOfListText)' marker seen" } else { "next page matched the previous one - no new data" }
+                if ($isDuplicate -and -not $isEndOfList) {
+                    $reason = 'next page matched the previous one - no new data'
                     Write-Host "[AutoClipCapture] [$($pipeline.Name)] Done - $reason. Processed $($global:CR_PipelineScreen1PageIdx + 1) page(s)." -ForegroundColor Green
                     Show-RelayResultOverlay -Text "PIPELINE COMPLETE" -Color ([System.Drawing.Color]::LimeGreen)
                     Stop-PipelineCapture
                     return
                 }
 
+                if ($isEndOfList) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Bottom of List is present on this REPOSITORY LIST page; scanning its COB rows as the final page." -ForegroundColor DarkCyan
+                }
+
                 # Page row count caps the clipboard-derived COB row list
                 # on the final partially filled page. The first COB line
                 # anchors at the calibrated screen row on every page.
                 $rowCount = Get-Screen1RowsOnPage -Text $text -RowsPerPage ([int]$s1.RowsPerPage)
+                $global:CR_PipelineScreen1IsLastPage = $isEndOfList
                 $global:CR_PipelineScreen1PrevPageText = $text
                 $nextPageRows = @(Get-Screen1RowsThroughLastCob -Text $text -Screen1Select $s1 -RowCount $rowCount)
                 $cobCount = @($nextPageRows | Where-Object { $_.HasCob }).Count
@@ -5359,6 +5369,7 @@ function Stop-PipelineCapture {
     $global:CR_PipelineListPrevFiltered = $null
     $global:CR_PipelineListOutputPath   = $null
     $global:CR_PipelineScreen1PageIdx      = 0
+    $global:CR_PipelineScreen1IsLastPage   = $false
     $global:CR_PipelineScreen1PrevPageText = $null
     $global:CR_PipelineScreen1RetryCount   = 0
     $global:CR_PipelineScreen1Rows          = @()
@@ -5581,6 +5592,7 @@ $global:CR_PipelineListOutputPath   = $null # resolved path of pipeline_componen
 # time a new page is scanned/paged into). Each row also carries BCount,
 # freshly derived from the selection field before COB. ----
 $global:CR_PipelineScreen1PageIdx      = 0     # 0-based page counter, for MaxPages/logging
+$global:CR_PipelineScreen1IsLastPage   = $false # current repository page includes the configured end-of-list marker
 $global:CR_PipelineScreen1PrevPageText = $null # previous page's raw capture, for end-of-list duplicate detection
 $global:CR_PipelineScreen1RetryCount   = 0     # consecutive "unrecognized screen"/"no rows found" retries
 $global:CR_PipelineScreen1Rows         = @()   # row slots through last COB: @{ LineIndex; ColIndex; HasCob }
@@ -6374,6 +6386,7 @@ $hotkeyAction = {
             $global:CR_PipelineListPrevFiltered = $null
             $global:CR_PipelineListOutputPath   = if ($useComponentList) { Join-Path $LogDir $pipeline.ComponentList.OutputFileName } else { $null }
             $global:CR_PipelineScreen1PageIdx      = 0
+            $global:CR_PipelineScreen1IsLastPage   = $false
             $global:CR_PipelineScreen1PrevPageText = $null
             $global:CR_PipelineScreen1RetryCount   = 0
             $global:CR_PipelineScreen1Rows          = @()
