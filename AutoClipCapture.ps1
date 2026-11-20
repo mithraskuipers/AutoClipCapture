@@ -1811,9 +1811,6 @@ public static class CR_DpiAwareness {
    CompZoom_Action  - click the row at
                       $global:CR_PipelineScreen1Rows[$global:CR_PipelineComponentIdx]
                       and type the selection letter.
-   CompZoom_VerifyWait/Copy - copy the REPOSITORY LIST after typing B
-                      and require B at the active row; only inspect the
-                      exact previously processed COB row for stale B.
    CompZoom_Cleanup_* - click a stale B row, delete it, and recopy the
                       page to verify it is clear before continuing.
    CompZoom_Wait    - short delay before copying, so the new screen
@@ -2310,12 +2307,13 @@ function Invoke-PipelineScreen1Tick {
                     return
                 }
                 # Advance before SendWait: it can pump Windows messages,
-                # so a nested timer tick must see VerifyWait and never
-                # dispatch a second B for this row.
-                $global:CR_PipelineState = 'CompZoom_VerifyWait'
+                # so a nested timer tick must never dispatch a second B.
+                # Enter is the very next terminal key after B; copying or
+                # clicking between them can leave HOD outside the row field.
+                $global:CR_PipelineState = 'CompZoom_Enter'
                 $global:CR_ElapsedMs = 0
                 [System.Windows.Forms.SendKeys]::SendWait([string]$s1.SelectionText)
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entered B for row $($global:CR_PipelineComponentIdx + 1); copying page to verify the selection" ([System.Drawing.Color]::Lime)
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entered B for row $($global:CR_PipelineComponentIdx + 1); preparing immediate Enter" ([System.Drawing.Color]::Lime)
             }
         }
 
@@ -2538,40 +2536,14 @@ function Invoke-PipelineScreen1Tick {
                 }
                 $rowIdx = [int]$global:CR_PipelineComponentIdx
                 $row = if ($rowIdx -ge 0 -and $rowIdx -lt $global:CR_PipelineScreen1Rows.Count) { $global:CR_PipelineScreen1Rows[$rowIdx] } else { $null }
-                if ($null -eq $row -or -not [bool]$row.HasCob -or [int]$row.BCount -ne 1) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] The verified B is no longer mapped to exactly one B on the active COB row; stopping before Enter." -ForegroundColor Red
-                    Show-RelayResultOverlay -Text "B ROW CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
+                if ($null -eq $row -or -not [bool]$row.HasCob) {
+                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] The active COB row is no longer mapped; stopping before Enter." -ForegroundColor Red
+                    Show-RelayResultOverlay -Text "COB ROW CHANGED - STOPPED" -Color ([System.Drawing.Color]::Red)
                     Stop-PipelineCapture
                     return
                 }
-                $pt = Get-Screen1RowScreenPoint -Handle $global:CR_TargetHandle -Screen1Select $s1 -LineIndex $row.LineIndex -ColIndex $row.ColIndex
-                if ($null -eq $pt) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Terminal geometry changed before Enter; stopping before key input." -ForegroundColor Red
-                    Show-RelayResultOverlay -Text "TERMINAL CALIBRATION STALE - STOPPED" -Color ([System.Drawing.Color]::Red)
-                    Stop-PipelineCapture
-                    return
-                }
-                $screenPt = New-Object System.Drawing.Point($pt.X, $pt.Y)
-                if (-not (Invoke-Screen1RowClick -ScreenPoint $screenPt)) {
-                    Write-Host "[AutoClipCapture] [$($pipeline.Name)] Could not re-focus the verified COB selection cell before Enter; stopping safely." -ForegroundColor Red
-                    Show-RelayResultOverlay -Text "ROW REFOCUS FAILED - STOPPED" -Color ([System.Drawing.Color]::Red)
-                    Stop-PipelineCapture
-                    return
-                }
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Re-focused verified B on COB row $($row.LineIndex); preparing Enter" ([System.Drawing.Color]::Lime)
-                $global:CR_PipelineState = 'CompZoom_EnterSend'
-                $global:CR_ElapsedMs = 0
-            }
-        }
-
-        'CompZoom_EnterSend' {
-            $global:CR_ElapsedMs += $TimerTickMs
-            if ($global:CR_ElapsedMs -ge [int]$PipelineTimingsMs.RepositoryList.AfterClickMs) {
-                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
-                    Skip-PipelineRowAfterFailure -Reason 'Target window was unavailable after re-focusing the B row and before Enter.' -ObservedText ([string]$global:CR_PipelineScreen1PrevPageText) -RepositoryListCommandMayBePresent
-                    return
-                }
-                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Entering verified COB row $($global:CR_PipelineComponentIdx + 1)" ([System.Drawing.Color]::Lime)
+                $global:CR_PipelineLastProcessedCobLineIndex = [int]$row.LineIndex
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : [$($pipeline.Name)] Sending Enter immediately after B on COB row $($row.LineIndex)" ([System.Drawing.Color]::Lime)
                 $global:CR_PipelineState = 'CompZoom_Wait'
                 $global:CR_ElapsedMs = 0
                 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
@@ -2653,8 +2625,8 @@ function Invoke-PipelineScreen1Tick {
                             Skip-PipelineRowAfterFailure -Reason $reason -ObservedText $text -RepositoryListCommandMayBePresent
                             return
                         }
-                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter; checking again before advancing ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
-                        $global:CR_PipelineState = 'CompZoom_Wait'
+                        Write-Host "[AutoClipCapture] [$($pipeline.Name)] Still on REPOSITORY LIST after Enter; retrying Enter on the same B row without typing another B ($($global:CR_PipelineScreen1RetryCount)/$maxRetries)." -ForegroundColor Yellow
+                        $global:CR_PipelineState = 'CompZoom_Enter'
                         $global:CR_ElapsedMs     = 0
                     }
                 }
